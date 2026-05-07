@@ -30,8 +30,9 @@ if (!myPlayerId) {
 
 // ─── Client State ────────────────────────────────────────────────────────────
 let myRole = null;
-let myName = null;
+let myName = storageGet('vk_player_name');
 let myLobbyCode = null;
+let pendingJoinLobbyId = null;
 let isHost = false;
 let isAlive = true;
 let fellowVampires = [];
@@ -65,7 +66,7 @@ const socket = io();
 // Yükleme ekranı takılmasın: sunucudan yanıt gelmezse isim girişini göster
 const _loadingFallback = setTimeout(() => {
   if (document.getElementById('screen-loading').classList.contains('active')) {
-    showScreen('name-entry');
+    if (myName) showLobbyBrowser(); else showScreen('name-entry');
   }
 }, 2000);
 
@@ -74,7 +75,7 @@ socket.on('connect', () => socket.emit('hello', { playerId: myPlayerId }));
 socket.on('connect_error', () => {
   clearTimeout(_loadingFallback);
   if (document.getElementById('screen-loading').classList.contains('active')) {
-    showScreen('name-entry');
+    if (myName) showLobbyBrowser(); else showScreen('name-entry');
     showToast('Sunucuya bağlanılamadı, tekrar deneniyor...');
   }
 });
@@ -107,7 +108,18 @@ function showScreen(id) {
 
 // ─── Socket Events ────────────────────────────────────────────────────────────
 
-socket.on('new_session', () => { clearTimeout(_loadingFallback); showScreen('name-entry'); });
+socket.on('new_session', () => {
+  clearTimeout(_loadingFallback);
+  if (myName) {
+    showLobbyBrowser();
+  } else {
+    showScreen('name-entry');
+  }
+});
+
+socket.on('lobby_list', (data) => {
+  renderLobbyList(data.lobbies || []);
+});
 
 socket.on('reconnected', (data) => {
   clearTimeout(_loadingFallback);
@@ -335,16 +347,12 @@ socket.on('game_over', (data) => {
 });
 
 socket.on('kicked', () => {
-  myName = null;
   myRole = null;
   isHost = false;
   storageSet('vk_player_id', generateUUID()); // yeni ID al, lobiye taze giriş
   myPlayerId = storageGet('vk_player_id');
   showToast('Lobi\'den çıkarıldınız.');
-  showScreen('name-entry');
-  document.getElementById('input-name').value = '';
-  document.getElementById('input-lobby-code').value = '';
-  document.getElementById('input-password').value = '';
+  showLobbyBrowser();
 });
 
 socket.on('became_host', () => {
@@ -365,7 +373,10 @@ socket.on('spectator_update', (data) => {
   }
 });
 
-socket.on('error', (data) => showError(data.message));
+socket.on('error', (data) => {
+  const onBrowser = document.getElementById('screen-lobby-browser')?.classList.contains('active');
+  showError(data.message, onBrowser ? 'error-lobby-browser' : 'error-name');
+});
 
 // ─── UI Builders ──────────────────────────────────────────────────────────────
 
@@ -600,9 +611,9 @@ function updateLobbyUI(data) {
   const connected = players.filter(p => p.connected !== false);
   document.getElementById('lobby-count').textContent = `${connected.length} oyuncu`;
 
-  const codeLabel = document.getElementById('lobby-code-label');
-  if (codeLabel && data.lobbyCode) {
-    codeLabel.textContent = data.lobbyCode;
+  const nameLabel = document.getElementById('lobby-name-label');
+  if (nameLabel && data.lobbyName) {
+    nameLabel.textContent = data.lobbyName;
     showEl('lobby-meta');
   }
   const passLabel = document.getElementById('lobby-password-label');
@@ -644,6 +655,61 @@ function updateLobbyUI(data) {
     hideEl('host-controls');
     showEl('lobby-waiting');
   }
+}
+
+function showLobbyBrowser() {
+  document.getElementById('browser-player-name').textContent = myName || '';
+  hideEl('join-password-panel');
+  document.getElementById('input-join-password').value = '';
+  showScreen('lobby-browser');
+  socket.emit('list_lobbies');
+}
+
+function renderLobbyList(lobbies) {
+  const list = document.getElementById('open-lobby-list');
+  const empty = document.getElementById('empty-lobby-list');
+  if (!list) return;
+
+  if (!lobbies.length) {
+    list.innerHTML = '';
+    showEl('empty-lobby-list');
+    return;
+  }
+
+  hideEl('empty-lobby-list');
+  list.innerHTML = lobbies.map(lobby => `
+    <li class="open-lobby-item">
+      <span>
+        <span class="open-lobby-name">${escHtml(lobby.name)}</span>
+        <span class="open-lobby-meta">${lobby.playerCount} oyuncu${lobby.hostName ? ` · Host: ${escHtml(lobby.hostName)}` : ''}${lobby.hasPassword ? ' · Şifreli' : ''}</span>
+      </span>
+      <button class="btn btn-sm btn-primary btn-open-lobby" data-id="${escHtml(lobby.id)}" data-name="${escHtml(lobby.name)}" data-password="${lobby.hasPassword ? '1' : '0'}">Katıl</button>
+    </li>
+  `).join('');
+
+  list.querySelectorAll('.btn-open-lobby').forEach(btn => {
+    btn.addEventListener('click', () => {
+      pendingJoinLobbyId = btn.dataset.id;
+      if (btn.dataset.password === '1') {
+        document.getElementById('join-password-title').textContent = `${btn.dataset.name} şifresi`;
+        document.getElementById('input-join-password').value = '';
+        showEl('join-password-panel');
+        document.getElementById('input-join-password').focus();
+      } else {
+        joinSelectedLobby('');
+      }
+    });
+  });
+}
+
+function joinSelectedLobby(password) {
+  if (!pendingJoinLobbyId || !myName) return;
+  socket.emit('join_lobby', {
+    name: myName,
+    playerId: myPlayerId,
+    lobbyId: pendingJoinLobbyId,
+    lobbyPassword: password
+  });
 }
 
 function syncHostControls(gameState) {
@@ -798,40 +864,46 @@ function stopTimers() {
 }
 
 // ─── UI Event Listeners ───────────────────────────────────────────────────────
-function getEntryValues() {
-  return {
-    name: document.getElementById('input-name').value.trim(),
-    lobbyCode: document.getElementById('input-lobby-code').value.trim().toUpperCase(),
-    password: document.getElementById('input-password').value
-  };
-}
-
-document.getElementById('btn-create-lobby').addEventListener('click', () => {
-  const { name, password } = getEntryValues();
+document.getElementById('btn-name-next').addEventListener('click', () => {
+  const name = document.getElementById('input-name').value.trim();
   if (!name) { showError('İsim giriniz.', 'error-name'); return; }
   myName = name;
-  socket.emit('create_lobby', { name, playerId: myPlayerId, password });
+  storageSet('vk_player_name', myName);
+  showLobbyBrowser();
 });
 
-document.getElementById('btn-join').addEventListener('click', () => {
-  const { name, lobbyCode, password } = getEntryValues();
-  if (!name) { showError('İsim giriniz.', 'error-name'); return; }
-  if (!lobbyCode) { showError('Lobi kodu giriniz.', 'error-name'); return; }
-  myName = name;
-  socket.emit('join_lobby', { name, playerId: myPlayerId, lobbyCode, lobbyPassword: password });
+document.getElementById('btn-create-lobby').addEventListener('click', () => {
+  const lobbyName = document.getElementById('input-lobby-name').value.trim();
+  const password = document.getElementById('input-create-password').value;
+  if (!myName) { showScreen('name-entry'); return; }
+  if (!lobbyName) { showError('Lobi adı giriniz.', 'error-lobby-browser'); return; }
+  socket.emit('create_lobby', { name: myName, playerId: myPlayerId, lobbyName, password });
 });
 
 document.getElementById('input-name').addEventListener('keydown', e => {
+  if (e.key === 'Enter') document.getElementById('btn-name-next').click();
+});
+document.getElementById('input-lobby-name').addEventListener('keydown', e => {
   if (e.key === 'Enter') document.getElementById('btn-create-lobby').click();
 });
-document.getElementById('input-lobby-code').addEventListener('keydown', e => {
-  if (e.key === 'Enter') document.getElementById('btn-join').click();
+document.getElementById('input-create-password').addEventListener('keydown', e => {
+  if (e.key === 'Enter') document.getElementById('btn-create-lobby').click();
 });
-document.getElementById('input-password').addEventListener('keydown', e => {
-  if (e.key === 'Enter') {
-    const hasCode = !!document.getElementById('input-lobby-code').value.trim();
-    document.getElementById(hasCode ? 'btn-join' : 'btn-create-lobby').click();
-  }
+document.getElementById('btn-refresh-lobbies').addEventListener('click', () => socket.emit('list_lobbies'));
+document.getElementById('btn-change-name').addEventListener('click', () => {
+  myName = null;
+  storageSet('vk_player_name', '');
+  showScreen('name-entry');
+});
+document.getElementById('btn-join-password-confirm').addEventListener('click', () => {
+  joinSelectedLobby(document.getElementById('input-join-password').value);
+});
+document.getElementById('btn-join-password-cancel').addEventListener('click', () => {
+  pendingJoinLobbyId = null;
+  hideEl('join-password-panel');
+});
+document.getElementById('input-join-password').addEventListener('keydown', e => {
+  if (e.key === 'Enter') document.getElementById('btn-join-password-confirm').click();
 });
 
 document.getElementById('btn-start').addEventListener('click', () => {
@@ -864,16 +936,6 @@ document.querySelectorAll('.vampire-count-btn').forEach(btn => {
     btn.classList.add('active');
     emitRoleConfig();
   });
-});
-
-document.getElementById('btn-copy-lobby-code').addEventListener('click', async () => {
-  if (!myLobbyCode) return;
-  try {
-    await navigator.clipboard.writeText(myLobbyCode);
-    showToast('Lobi kodu kopyalandı.');
-  } catch (e) {
-    showToast(`Lobi kodu: ${myLobbyCode}`);
-  }
 });
 
 document.querySelectorAll('.discuss-btn').forEach(btn => {

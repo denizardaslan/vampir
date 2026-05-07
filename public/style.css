@@ -169,6 +169,63 @@ input[type="password"]:focus { border-color: var(--accent); }
   gap: 10px;
 }
 
+.lobby-browser-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 12px;
+}
+
+.lobby-browser-section {
+  margin-top: 18px;
+}
+
+.create-lobby-box {
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.open-lobby-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  list-style: none;
+}
+
+.open-lobby-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+}
+
+.open-lobby-name {
+  display: block;
+  font-weight: 800;
+}
+
+.open-lobby-meta {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
+.join-password-panel {
+  margin-top: 16px;
+  padding: 16px;
+  border: 2px solid var(--accent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+}
+
+.join-password-panel input {
+  margin-bottom: 10px;
+}
+
 input[type="checkbox"] {
   width: 22px;
   height: 22px;

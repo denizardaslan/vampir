@@ -25,12 +25,14 @@ Sunucu `http://localhost:3000` adresinde başlar.
 
 ## Nasıl Oynanır
 
-1. Bir oyuncu **Lobi Kur** ile oda oluşturur ve otomatik host olur.
-2. Diğer oyuncular lobi kodu ve varsa lobi şifresiyle katılır.
-3. Host doktor, kahin, vampir sayısı, ilk gece öldürme ve tartışma süresi ayarlarını yapar.
-4. En az 3 oyuncu olduğunda ve vampir sayısı oyuncu sayısından az olduğunda host **Oyunu Başlat**'a basar.
-5. Herkes kendi rolünü görür, gece başlar.
-6. Oyun moderatörsüz, tamamen otomatik ilerler.
+1. Oyuncu ilk ekranda sadece adını girer.
+2. Sonraki ekranda açık lobileri görür veya kendi lobisini kurar.
+3. Lobi kuran oyuncu lobi adı ve opsiyonel şifre belirler; otomatik host olur.
+4. Diğer oyuncular listeden lobiyi seçer, varsa şifreyi girip katılır.
+5. Host doktor, kahin, vampir sayısı, ilk gece öldürme ve tartışma süresi ayarlarını yapar.
+6. En az 3 oyuncu olduğunda ve vampir sayısı oyuncu sayısından az olduğunda host **Oyunu Başlat**'a basar.
+7. Herkes kendi rolünü görür, gece başlar.
+8. Oyun moderatörsüz, tamamen otomatik ilerler.
 
 ## Roller
 

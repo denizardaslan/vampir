@@ -24,17 +24,49 @@
       <div class="form-group">
         <input type="text" id="input-name" placeholder="İsmin nedir?" maxlength="20" autocomplete="off">
       </div>
-      <div class="form-group">
-        <input type="text" id="input-lobby-code" placeholder="Lobi kodu (katılırken)" maxlength="8" autocomplete="off">
-      </div>
-      <div class="form-group">
-        <input type="password" id="input-password" placeholder="Lobi şifresi (opsiyonel)" maxlength="24" autocomplete="off">
-      </div>
-      <div class="entry-actions">
-        <button id="btn-create-lobby" class="btn btn-primary">Lobi Kur</button>
-        <button id="btn-join" class="btn btn-ghost">Lobiye Katıl</button>
-      </div>
+      <button id="btn-name-next" class="btn btn-primary">Devam Et</button>
       <p id="error-name" class="error-msg"></p>
+    </div>
+  </div>
+
+  <!-- Lobi Seçimi -->
+  <div id="screen-lobby-browser" class="screen">
+    <div class="card">
+      <h2>Lobiler</h2>
+      <p class="subtitle"><span id="browser-player-name"></span> olarak devam ediyorsun</p>
+
+      <div class="lobby-browser-actions">
+        <button id="btn-refresh-lobbies" class="btn btn-sm btn-ghost">Yenile</button>
+      </div>
+
+      <div class="lobby-browser-section">
+        <h3>Açık Lobiler</h3>
+        <ul id="open-lobby-list" class="open-lobby-list"></ul>
+        <p id="empty-lobby-list" class="waiting-msg hidden">Henüz açık lobi yok.</p>
+      </div>
+
+      <div class="lobby-browser-section create-lobby-box">
+        <h3>Lobi Kur</h3>
+      <div class="form-group">
+          <input type="text" id="input-lobby-name" placeholder="Lobi adı" maxlength="28" autocomplete="off">
+      </div>
+      <div class="form-group">
+          <input type="password" id="input-create-password" placeholder="Şifre (opsiyonel)" maxlength="24" autocomplete="off">
+      </div>
+        <button id="btn-create-lobby" class="btn btn-primary">Lobi Kur</button>
+      </div>
+
+      <div id="join-password-panel" class="join-password-panel hidden">
+        <h3 id="join-password-title">Şifreli Lobi</h3>
+        <input type="password" id="input-join-password" placeholder="Lobi şifresi" maxlength="24" autocomplete="off">
+        <div class="confirm-btns">
+          <button id="btn-join-password-confirm" class="btn btn-primary">Katıl</button>
+          <button id="btn-join-password-cancel" class="btn btn-ghost">İptal</button>
+        </div>
+      </div>
+
+      <button id="btn-change-name" class="btn btn-ghost">İsmi Değiştir</button>
+      <p id="error-lobby-browser" class="error-msg"></p>
     </div>
   </div>
 
@@ -44,9 +76,8 @@
       <h2>Lobi</h2>
       <p class="subtitle" id="lobby-count">0 oyuncu</p>
       <div id="lobby-meta" class="lobby-meta hidden">
-        <span>Kod: <strong id="lobby-code-label"></strong></span>
+        <span>Lobi: <strong id="lobby-name-label"></strong></span>
         <span id="lobby-password-label" class="hidden">Şifre: <strong></strong></span>
-        <button id="btn-copy-lobby-code" class="btn btn-sm btn-ghost">Kopyala</button>
       </div>
       <ul id="lobby-player-list" class="player-list"></ul>
 

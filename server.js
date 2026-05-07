@@ -13,9 +13,10 @@ app.use(express.static(path.join(__dirname, 'public')));
 const games = new Map();
 const testDashboardRooms = new Map();
 
-function makeGame({ code, password = '' }) {
+function makeGame({ code, name, password = '' }) {
   return {
     code,
+    name,
     password,
     phase: 'lobby',
     players: [],
@@ -116,6 +117,22 @@ function getRoleConfig(game) {
   };
 }
 
+function getPublicLobbies() {
+  return Array.from(games.values())
+    .filter(game => game.phase === 'lobby')
+    .map(game => ({
+      id: game.code,
+      name: game.name,
+      hasPassword: !!game.password,
+      playerCount: game.players.filter(p => !p.disconnected).length,
+      hostName: game.players.find(p => p.isHost)?.name || ''
+    }));
+}
+
+function sendLobbyList() {
+  io.emit('lobby_list', { lobbies: getPublicLobbies() });
+}
+
 function buildRoles(game) {
   const playerCount = game.players.length;
   const vampireCount = Math.min(game.vampireCount, Math.max(1, playerCount - 1));
@@ -159,6 +176,7 @@ function sendLobbyUpdate(game) {
   game.players.forEach(p => {
     emitToPlayer(p, 'lobby_update', {
       lobbyCode: game.code,
+      lobbyName: game.name,
       lobbyPassword: p.isHost ? game.password : null,
       players,
       isHost: p.isHost,
@@ -166,11 +184,13 @@ function sendLobbyUpdate(game) {
     });
   });
   sendTestDashboardUpdate(game);
+  sendLobbyList();
 }
 
 function buildSpectatorData(game) {
   return {
     lobbyCode: game.code,
+    lobbyName: game.name,
     players: getAllRoles(game),
     phase: game.phase,
     nightActions: {
@@ -489,16 +509,18 @@ function buildTestDashboardData(game) {
   if (!game) {
     return {
       lobbyCode: null,
+      lobbyName: null,
       phase: 'none',
       phaseLabel: 'Lobi yok',
       dayNumber: 0,
       players: [],
-      lobbies: Array.from(games.values()).map(g => ({ code: g.code, players: g.players.length, phase: g.phase }))
+      lobbies: Array.from(games.values()).map(g => ({ code: g.code, name: g.name, players: g.players.length, phase: g.phase }))
     };
   }
 
   return {
     lobbyCode: game.code,
+    lobbyName: game.name,
     phase: game.phase,
     phaseLabel: phaseLabel(game.phase),
     dayNumber: game.dayNumber,
@@ -518,7 +540,7 @@ function buildTestDashboardData(game) {
       screen: getPlayerScreen(game, p)
     })),
     spectator: buildSpectatorData(game),
-    lobbies: Array.from(games.values()).map(g => ({ code: g.code, players: g.players.length, phase: g.phase }))
+    lobbies: Array.from(games.values()).map(g => ({ code: g.code, name: g.name, players: g.players.length, phase: g.phase }))
   };
 }
 
@@ -543,6 +565,7 @@ function attachPlayerToGame(socket, game, player) {
 function emitReconnect(socket, game, player) {
   socket.emit('reconnected', {
     lobbyCode: game.code,
+    lobbyName: game.name,
     phase: game.phase,
     player: {
       id: player.id,
@@ -573,12 +596,14 @@ function emitReconnect(socket, game, player) {
   }
 }
 
-function createLobby(socket, { name, playerId, password }) {
+function createLobby(socket, { name, playerId, lobbyName, password }) {
   const trimmed = String(name || '').trim();
+  const roomName = String(lobbyName || '').trim();
   if (!trimmed) { socket.emit('error', { message: 'İsim boş olamaz.' }); return; }
+  if (!roomName) { socket.emit('error', { message: 'Lobi adı boş olamaz.' }); return; }
 
   const code = makeLobbyCode();
-  const game = makeGame({ code, password: String(password || '').trim() });
+  const game = makeGame({ code, name: roomName, password: String(password || '').trim() });
   games.set(code, game);
   const player = { id: playerId, name: trimmed, role: null, alive: true, socketId: socket.id, isHost: true };
   game.players.push(player);
@@ -586,8 +611,8 @@ function createLobby(socket, { name, playerId, password }) {
   sendLobbyUpdate(game);
 }
 
-function joinLobby(socket, { name, playerId, lobbyCode, lobbyPassword }) {
-  const code = normalizeCode(lobbyCode);
+function joinLobby(socket, { name, playerId, lobbyCode, lobbyId, lobbyPassword }) {
+  const code = normalizeCode(lobbyId || lobbyCode);
   const game = games.get(code);
   if (!game) { socket.emit('error', { message: 'Lobi bulunamadı.' }); return; }
   if (game.phase !== 'lobby') { socket.emit('error', { message: 'Bu lobide oyun başlamış.' }); return; }
@@ -636,6 +661,10 @@ io.on('connection', (socket) => {
     attachPlayerToGame(socket, game, player);
     emitReconnect(socket, game, player);
     sendLobbyUpdate(game);
+  });
+
+  socket.on('list_lobbies', () => {
+    socket.emit('lobby_list', { lobbies: getPublicLobbies() });
   });
 
   socket.on('create_lobby', (data) => createLobby(socket, data));
@@ -704,6 +733,7 @@ io.on('connection', (socket) => {
 
     io.to(game.code).emit('phase_change', { phase: 'role_reveal', data: {} });
     sendTestDashboardUpdate(game);
+    sendLobbyList();
     setTimeout(() => startNight(game), 5000);
   });
 
@@ -880,7 +910,7 @@ io.on('connection', (socket) => {
 
   socket.on('test_seed_lobby', ({ playerCount = 6, withDoctor = true, withSeer = true, vampireCount = 2, noKillFirstNight = false } = {}) => {
     const code = makeLobbyCode();
-    const game = makeGame({ code, password: 'demo' });
+    const game = makeGame({ code, name: 'Demo Lobi', password: 'demo' });
     game.withDoctor = !!withDoctor;
     game.withSeer = !!withSeer;
     game.vampireCount = Math.max(1, Math.min(3, Number(vampireCount) || 2));
@@ -915,6 +945,7 @@ io.on('connection', (socket) => {
     game.players.forEach((p, i) => { p.role = roles[i]; p.alive = true; });
     game.phase = 'role_reveal';
     sendTestDashboardUpdate(game);
+    sendLobbyList();
     setTimeout(() => startNight(game), 5000);
   });
 
@@ -980,8 +1011,12 @@ io.on('connection', (socket) => {
       player.removeTimer = setTimeout(() => {
         game.players = game.players.filter(p => p.id !== player.id);
         if (player.isHost && game.players.length) game.players[0].isHost = true;
-        if (!game.players.length) games.delete(game.code);
-        else sendLobbyUpdate(game);
+        if (!game.players.length) {
+          games.delete(game.code);
+          sendLobbyList();
+        } else {
+          sendLobbyUpdate(game);
+        }
       }, 30000);
     }
   });
