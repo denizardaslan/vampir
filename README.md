@@ -2,6 +2,8 @@
 
 Esnek oyuncu sayısıyla, moderatörsüz, local ağ üzerinden oynanan Vampir Köylü oyunu.
 
+Canlı demo: https://vampir-bz87.onrender.com/
+
 ## Kurulum & Çalıştırma
 
 ```bash
