@@ -1,0 +1,339 @@
+*, *::before, *::after { box-sizing: border-box; }
+
+:root {
+  --bg: #f4f6f8;
+  --surface: #ffffff;
+  --surface-2: #eef2f6;
+  --text: #18212f;
+  --muted: #667085;
+  --border: #d8dee8;
+  --accent: #2563eb;
+  --danger: #b42318;
+  --good: #087443;
+  --shadow: 0 12px 32px rgba(24, 33, 47, 0.08);
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+button, input { font: inherit; }
+
+.test-shell {
+  width: min(1420px, 100%);
+  margin: 0 auto;
+  padding: 24px;
+}
+
+.test-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+
+.eyebrow {
+  margin: 0 0 4px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+h1, h2, h3, p { margin-top: 0; }
+h1 { margin-bottom: 0; font-size: 2rem; }
+h2 { margin-bottom: 12px; font-size: 1rem; }
+
+.game-link,
+.tool-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 40px;
+  padding: 0 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font-weight: 700;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.tool-btn.primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
+.control-bar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 18px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(10px);
+}
+
+.status-pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 0 14px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  font-weight: 800;
+}
+
+.status-pill small {
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.check-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 0 10px;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.overview-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 14px;
+  margin-bottom: 24px;
+}
+
+.overview-panel,
+.player-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.overview-panel {
+  padding: 16px;
+}
+
+.state-list {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin: 0;
+}
+
+.state-list div {
+  padding: 10px;
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.state-list dt {
+  margin-bottom: 4px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.state-list dd {
+  margin: 0;
+  font-weight: 800;
+}
+
+.compact-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.compact-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 10px;
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.compact-list span {
+  color: var(--muted);
+  font-size: 0.88rem;
+  font-weight: 700;
+}
+
+.compact-list strong {
+  text-align: right;
+}
+
+.section-title {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.section-title p {
+  margin-bottom: 12px;
+  color: var(--muted);
+}
+
+.player-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.player-card {
+  display: flex;
+  flex-direction: column;
+  min-height: 250px;
+  overflow: hidden;
+  border-top: 4px solid var(--border);
+}
+
+.player-card.role-vampire { border-top-color: #b42318; }
+.player-card.role-doctor { border-top-color: #1570ef; }
+.player-card.role-seer { border-top-color: #7a5af8; }
+.player-card.role-villager { border-top-color: #099250; }
+.player-card.is-dead { opacity: 0.68; }
+
+.player-topline {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 16px 10px;
+}
+
+.player-topline h3 {
+  margin-bottom: 4px;
+  font-size: 1.2rem;
+}
+
+.player-topline p {
+  margin-bottom: 0;
+  color: var(--muted);
+  font-weight: 800;
+}
+
+.badge-stack {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.mini-badge {
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: #dbeafe;
+  color: #1d4ed8;
+  font-size: 0.75rem;
+  font-weight: 800;
+}
+
+.mini-badge.muted {
+  background: #f2f4f7;
+  color: var(--muted);
+}
+
+.screen-box {
+  margin: 0 16px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.screen-name {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--accent);
+  font-size: 0.78rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.screen-box strong {
+  display: block;
+  margin-bottom: 8px;
+  line-height: 1.25;
+}
+
+.screen-box p {
+  margin-bottom: 0;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.player-card footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: auto;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.84rem;
+  font-weight: 800;
+}
+
+.empty-state {
+  grid-column: 1 / -1;
+  padding: 28px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  color: var(--muted);
+  text-align: center;
+  background: var(--surface);
+}
+
+@media (max-width: 1000px) {
+  .overview-grid,
+  .player-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 700px) {
+  .test-shell { padding: 16px; }
+  .test-header,
+  .section-title {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .overview-grid,
+  .player-grid {
+    grid-template-columns: 1fr;
+  }
+  .control-bar {
+    position: static;
+  }
+  .tool-btn,
+  .game-link {
+    width: 100%;
+  }
+}

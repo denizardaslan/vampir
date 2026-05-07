@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Vampir Köylü Test Paneli</title>
+  <link rel="stylesheet" href="test.css">
+</head>
+<body>
+  <main class="test-shell">
+    <header class="test-header">
+      <div>
+        <p class="eyebrow">Test gözlem paneli</p>
+        <h1>Oyuncu ekranları</h1>
+      </div>
+      <a class="game-link" href="/">Oyuna dön</a>
+    </header>
+
+    <section class="control-bar">
+      <div class="status-pill">
+        <span id="phase-label">Bağlanıyor</span>
+        <small id="day-label"></small>
+      </div>
+      <label class="check-row">
+        <input type="checkbox" id="test-with-seer" checked>
+        Kahin var
+      </label>
+      <label class="check-row">
+        <input type="checkbox" id="test-no-kill">
+        İlk gece öldürme yok
+      </label>
+      <button id="btn-seed" class="tool-btn">Demo lobisi kur</button>
+      <button id="btn-start-demo" class="tool-btn primary">Demo oyunu başlat</button>
+      <button id="btn-auto-night" class="tool-btn">Geceyi doldur</button>
+      <button id="btn-auto-vote" class="tool-btn">Oylamayı doldur</button>
+    </section>
+
+    <section class="overview-grid">
+      <article class="overview-panel">
+        <h2>Canlı durum</h2>
+        <dl class="state-list">
+          <div>
+            <dt>Faz</dt>
+            <dd id="state-phase">-</dd>
+          </div>
+          <div>
+            <dt>Gün</dt>
+            <dd id="state-day">-</dd>
+          </div>
+          <div>
+            <dt>Oyuncu</dt>
+            <dd id="state-player-count">-</dd>
+          </div>
+          <div>
+            <dt>Kazanan</dt>
+            <dd id="state-winner">-</dd>
+          </div>
+        </dl>
+      </article>
+
+      <article class="overview-panel">
+        <h2>Gizli aksiyonlar</h2>
+        <ul id="action-list" class="compact-list">
+          <li>Henüz veri yok</li>
+        </ul>
+      </article>
+
+      <article class="overview-panel">
+        <h2>Oylar</h2>
+        <ul id="vote-list" class="compact-list">
+          <li>Henüz oy yok</li>
+        </ul>
+      </article>
+    </section>
+
+    <section>
+      <div class="section-title">
+        <h2>Rol ekranları</h2>
+        <p>Her kart, o oyuncunun şu anda hangi ekranı ve hangi kritik bilgiyi gördüğünü özetler.</p>
+      </div>
+      <div id="player-grid" class="player-grid"></div>
+    </section>
+  </main>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="test.js"></script>
+</body>
+</html>

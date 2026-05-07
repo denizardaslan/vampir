@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Vampir Köylü</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- Yükleniyor -->
+  <div id="screen-loading" class="screen active">
+    <div class="loading-inner">
+      <div class="loading-icon">🧛</div>
+      <p>Bağlanıyor...</p>
+    </div>
+  </div>
+
+  <!-- İsim Girişi -->
+  <div id="screen-name-entry" class="screen">
+    <div class="card">
+      <h1 class="game-title">🧛 Vampir Köylü</h1>
+      <p class="subtitle">6 kişilik local oyun</p>
+      <div class="form-group">
+        <input type="text" id="input-name" placeholder="İsmin nedir?" maxlength="20" autocomplete="off">
+      </div>
+      <div class="form-group">
+        <input type="password" id="input-password" placeholder="Host şifresi (opsiyonel)" maxlength="20" autocomplete="off">
+      </div>
+      <button id="btn-join" class="btn btn-primary">Lobiye Katıl</button>
+      <p id="error-name" class="error-msg"></p>
+    </div>
+  </div>
+
+  <!-- Lobi -->
+  <div id="screen-lobby" class="screen">
+    <div class="card">
+      <h2>Lobi</h2>
+      <p class="subtitle" id="lobby-count">0 / 6 oyuncu</p>
+      <ul id="lobby-player-list" class="player-list"></ul>
+
+      <div id="host-controls" class="host-controls hidden">
+        <div class="toggle-row">
+          <label for="toggle-seer">Kahin var</label>
+          <input type="checkbox" id="toggle-seer" checked>
+        </div>
+        <div class="toggle-row">
+          <label for="toggle-no-kill">İlk gece öldürme yok</label>
+          <input type="checkbox" id="toggle-no-kill">
+        </div>
+        <div class="discuss-row">
+          <label>Tartışma süresi:</label>
+          <div class="btn-group">
+            <button class="btn btn-sm discuss-btn active" data-min="3">3 dk</button>
+            <button class="btn btn-sm discuss-btn" data-min="5">5 dk</button>
+            <button class="btn btn-sm discuss-btn" data-min="7">7 dk</button>
+          </div>
+        </div>
+        <button id="btn-start" class="btn btn-primary" disabled>Başlat (6/6 gerekli)</button>
+      </div>
+      <p id="lobby-waiting" class="waiting-msg">Host oyunu başlatana kadar bekle...</p>
+    </div>
+  </div>
+
+  <!-- Rol Açıklaması -->
+  <div id="screen-role-reveal" class="screen night">
+    <div class="card role-card" id="role-card">
+      <p class="role-label">Senin rolün:</p>
+      <div class="role-icon" id="role-icon"></div>
+      <h2 class="role-name" id="role-name"></h2>
+      <p class="role-desc" id="role-desc"></p>
+      <p class="fellow-vampires" id="fellow-vampires"></p>
+      <p class="countdown-hint">Gece <span id="role-countdown">5</span> saniyede başlıyor...</p>
+    </div>
+  </div>
+
+  <!-- Gece – Vampir -->
+  <div id="screen-night-vampire" class="screen night">
+    <div class="night-layout">
+      <div class="night-header">
+        <h2>🌙 Gece <span class="day-num"></span></h2>
+        <p class="night-subtitle">Kurbanı seçin ve onaylayın</p>
+      </div>
+
+      <div class="target-section">
+        <div id="vampire-no-kill-banner" class="no-kill-banner hidden">
+          🌙 Bu gece kimseyi öldüremezsiniz.<br>
+          <small>Diğer vampirle tanışın, plan yapın.</small>
+        </div>
+        <div id="vampire-kill-section">
+          <h3>Hedef Seç</h3>
+          <ul id="vampire-target-list" class="target-list"></ul>
+          <div id="vampire-selection-status" class="selection-status hidden"></div>
+          <button id="btn-vampire-confirm" class="btn btn-danger hidden">Onayla ✓</button>
+        </div>
+      </div>
+
+      <div class="chat-section">
+        <h3>Vampir Sohbeti</h3>
+        <div id="vampire-chat-messages" class="chat-messages"></div>
+        <div class="chat-input-row">
+          <input type="text" id="vampire-chat-input" placeholder="Mesaj yaz..." maxlength="200" autocomplete="off">
+          <button id="btn-send-chat" class="btn btn-sm btn-ghost">Gönder</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Gece – Doktor -->
+  <div id="screen-night-doctor" class="screen night">
+    <div class="card">
+      <h2>🌙 Gece <span class="day-num"></span></h2>
+      <p class="night-subtitle">Kimi koruyacaksın?</p>
+      <div id="doctor-no-kill-banner" class="no-kill-banner hidden">
+        🌙 Bu gece kimseyi koruyamazsınız.<br>
+        <small>Sabahı bekleyin.</small>
+      </div>
+      <ul id="doctor-target-list" class="target-list"></ul>
+      <div id="doctor-confirmed" class="confirmed-msg hidden"></div>
+      <p id="self-protect-warning" class="warning-msg hidden">⚠️ Bu gece kendinizi koruyamazsınız (arka arkaya yasak)</p>
+    </div>
+  </div>
+
+  <!-- Gece – Kahin -->
+  <div id="screen-night-seer" class="screen night">
+    <div class="card">
+      <h2>🌙 Gece <span class="day-num"></span></h2>
+      <p class="night-subtitle">Kimin rolünü öğrenmek istiyorsun?</p>
+      <ul id="seer-target-list" class="target-list"></ul>
+      <div id="seer-result" class="seer-result hidden"></div>
+    </div>
+  </div>
+
+  <!-- Gece – Köylü / Uyuyor -->
+  <div id="screen-night-villager" class="screen night">
+    <div class="card sleeping-card">
+      <div class="sleep-icon">😴</div>
+      <h2>Gece <span class="day-num"></span></h2>
+      <p>Uyuyorsun...</p>
+      <p class="sleep-hint">Gözlerini kapat, telefonu açık tut.</p>
+    </div>
+  </div>
+
+  <!-- Ölüm Flaşı -->
+  <div id="screen-death-flash" class="screen">
+    <div class="death-flash-inner" id="death-flash-inner">
+      <div class="death-flash-icon" id="death-flash-icon"></div>
+      <h1 class="death-flash-title" id="death-flash-title"></h1>
+      <p class="death-flash-sub" id="death-flash-sub"></p>
+    </div>
+  </div>
+
+  <!-- Gündüz Açılışı -->
+  <div id="screen-day-reveal" class="screen day">
+    <div class="card reveal-card">
+      <div id="reveal-content"></div>
+    </div>
+  </div>
+
+  <!-- Tartışma -->
+  <div id="screen-day-discuss" class="screen day">
+    <div class="card">
+      <h2>☀️ Gün <span class="day-num"></span> – Tartışma</h2>
+      <p class="subtitle">Yüz yüze konuşun, vampirleri bulun!</p>
+      <div class="timer-ring">
+        <span id="discuss-timer">5:00</span>
+      </div>
+      <div id="host-vote-btn-wrap" class="hidden">
+        <button id="btn-start-voting" class="btn btn-primary">Oylamaya Geç →</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Oylama -->
+  <div id="screen-day-vote" class="screen day">
+    <div class="card">
+      <h2>🗳️ Oylama</h2>
+      <p class="subtitle">Kimi asmak istiyorsunuz?</p>
+      <div id="vote-progress" class="vote-progress"></div>
+
+      <div id="vote-selection" class="">
+        <ul id="vote-target-list" class="target-list"></ul>
+        <button class="btn btn-sm btn-ghost" id="btn-abstain">Çekimser</button>
+      </div>
+
+      <div id="vote-confirm-panel" class="hidden confirm-panel">
+        <p>Oyunu <strong id="vote-confirm-name"></strong>'a vermek istiyor musun?</p>
+        <div class="confirm-btns">
+          <button id="btn-vote-yes" class="btn btn-danger">Evet, as!</button>
+          <button id="btn-vote-cancel" class="btn btn-ghost">Geri</button>
+        </div>
+      </div>
+
+      <div id="vote-done-msg" class="hidden">
+        <p class="waiting-msg">Oyunu kullandın, diğerleri bekleniyor...</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Oyun Sonu -->
+  <div id="screen-game-over" class="screen">
+    <div class="card">
+      <div id="winner-banner"></div>
+      <h3>Tüm Roller</h3>
+      <ul id="all-roles-list" class="roles-list"></ul>
+      <div id="host-newgame-wrap" class="hidden">
+        <button id="btn-new-game" class="btn btn-primary">Yeni Oyun</button>
+      </div>
+      <p id="waiting-host-newgame" class="waiting-msg hidden">Host yeni oyun başlatana kadar bekle...</p>
+    </div>
+  </div>
+
+  <!-- İzleyici -->
+  <div id="screen-spectator" class="screen spectator">
+    <div class="spectator-layout">
+      <div class="spectator-header">
+        <h2>👁️ İzliyorsun</h2>
+        <p class="subtitle" id="spectator-phase"></p>
+        <!-- Ölü host için kontrol paneli -->
+        <div id="spec-host-panel" class="hidden">
+          <div id="spec-discuss-timer" class="spec-timer-display"></div>
+          <button id="btn-start-voting-spec" class="btn btn-primary" style="max-width:280px;margin:8px auto 0;">Oylamaya Geç →</button>
+        </div>
+      </div>
+      <div class="spectator-sections">
+        <div class="spec-section">
+          <h3>Oyuncular</h3>
+          <ul id="spec-players" class="roles-list"></ul>
+        </div>
+        <div class="spec-section" id="spec-night-section">
+          <h3>Gece Aksiyonları</h3>
+          <ul id="spec-actions" class="spec-list"></ul>
+        </div>
+        <div class="spec-section" id="spec-chat-section">
+          <h3>Vampir Sohbeti</h3>
+          <div id="spec-chat" class="chat-messages"></div>
+        </div>
+        <div class="spec-section" id="spec-votes-section">
+          <h3>Oylar</h3>
+          <ul id="spec-votes" class="spec-list"></ul>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Host: Oyunu Bitir -->
+  <button id="btn-force-end" class="btn-force-end hidden">⏹ Oyunu Bitir</button>
+  <div id="force-end-overlay" class="force-end-overlay hidden">
+    <div class="force-end-dialog">
+      <p>Oyunu erken bitirmek istediğine emin misin?</p>
+      <div class="confirm-btns">
+        <button id="btn-force-end-yes" class="btn btn-danger">Evet, bitir</button>
+        <button id="btn-force-end-no" class="btn btn-ghost">İptal</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
