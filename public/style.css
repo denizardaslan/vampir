@@ -148,7 +148,8 @@ h3 { font-size: 1.1rem; margin-bottom: 12px; }
 
 /* ─── Forms ─────────────────────────────────────────────────────────────────── */
 .form-group { margin: 16px 0; }
-input[type="text"] {
+input[type="text"],
+input[type="password"] {
   width: 100%;
   padding: 14px 16px;
   border: 2px solid var(--border);
@@ -159,7 +160,14 @@ input[type="text"] {
   outline: none;
   transition: border-color 0.2s;
 }
-input[type="text"]:focus { border-color: var(--accent); }
+input[type="text"]:focus,
+input[type="password"]:focus { border-color: var(--accent); }
+
+.entry-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
 
 input[type="checkbox"] {
   width: 22px;
@@ -216,6 +224,23 @@ input[type="checkbox"] {
 }
 
 .host-controls { margin-top: 20px; }
+.lobby-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 12px 0 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+.lobby-meta strong {
+  color: var(--text);
+  letter-spacing: 0.08em;
+}
 .toggle-row {
   display: flex;
   align-items: center;

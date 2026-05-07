@@ -19,22 +19,32 @@ socket.on('test_dashboard_update', (state) => {
 });
 
 document.getElementById('btn-seed').addEventListener('click', () => {
-  socket.emit('test_seed_lobby');
+  socket.emit('test_seed_lobby', getTestConfig());
 });
 
 document.getElementById('btn-start-demo').addEventListener('click', () => {
   socket.emit('test_start_game', {
-    withSeer: document.getElementById('test-with-seer').checked,
-    noKillFirstNight: document.getElementById('test-no-kill').checked
+    lobbyCode: latestState?.lobbyCode,
+    ...getTestConfig()
   });
 });
 
+function getTestConfig() {
+  return {
+    playerCount: Number(document.getElementById('test-player-count').value) || 6,
+    vampireCount: Number(document.getElementById('test-vampire-count').value) || 2,
+    withDoctor: document.getElementById('test-with-doctor').checked,
+    withSeer: document.getElementById('test-with-seer').checked,
+    noKillFirstNight: document.getElementById('test-no-kill').checked
+  };
+}
+
 document.getElementById('btn-auto-night').addEventListener('click', () => {
-  socket.emit('test_auto_night');
+  socket.emit('test_auto_night', { lobbyCode: latestState?.lobbyCode });
 });
 
 document.getElementById('btn-auto-vote').addEventListener('click', () => {
-  socket.emit('test_auto_vote');
+  socket.emit('test_auto_vote', { lobbyCode: latestState?.lobbyCode });
 });
 
 function renderState(state) {
@@ -42,7 +52,7 @@ function renderState(state) {
   dayLabel.textContent = state.dayNumber ? `Gün ${state.dayNumber}` : '';
   text('state-phase', state.phaseLabel || state.phase || '-');
   text('state-day', state.dayNumber || '-');
-  text('state-player-count', `${state.players?.length || 0} / 6`);
+  text('state-player-count', `${state.players?.length || 0}`);
   text('state-winner', winnerLabel(state.winner));
 
   renderActions(state.spectator?.nightActions || {});

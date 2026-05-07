@@ -1,6 +1,6 @@
 # Vampir Köylü
 
-6 kişilik, moderatörsüz, local ağ üzerinden oynanan Vampir Köylü oyunu.
+Esnek oyuncu sayısıyla, moderatörsüz, local ağ üzerinden oynanan Vampir Köylü oyunu.
 
 ## Kurulum & Çalıştırma
 
@@ -25,20 +25,23 @@ Sunucu `http://localhost:3000` adresinde başlar.
 
 ## Nasıl Oynanır
 
-1. İlk bağlanan oyuncu **host** olur.
-2. 6 kişi lobiye katılınca host **Kahin var mı?** seçeneğini ayarlar ve **Oyunu Başlat**'a basar.
-3. Herkes kendi rolünü görür, gece başlar.
-4. Oyun moderatörsüz, tamamen otomatik ilerler.
+1. Bir oyuncu **Lobi Kur** ile oda oluşturur ve otomatik host olur.
+2. Diğer oyuncular lobi kodu ve varsa lobi şifresiyle katılır.
+3. Host doktor, kahin, vampir sayısı, ilk gece öldürme ve tartışma süresi ayarlarını yapar.
+4. En az 3 oyuncu olduğunda ve vampir sayısı oyuncu sayısından az olduğunda host **Oyunu Başlat**'a basar.
+5. Herkes kendi rolünü görür, gece başlar.
+6. Oyun moderatörsüz, tamamen otomatik ilerler.
 
 ## Roller
 
 | Rol | Sayı | Görev |
 |-----|------|-------|
-| Vampir | 2 | Her gece bir köylüyü öldür |
-| Doktor | 1 | Her gece birini koru |
+| Vampir | 1-3 | Her gece bir köylüyü öldür |
+| Doktor | 0-1 | Her gece birini koru |
 | Kahin | 0-1 | Her gece birinin rolünü öğren |
-| Köylü | 2-3 | Vampirleri bul ve as |
+| Köylü | Kalan oyuncular | Vampirleri bul ve as |
 
 ## Tek Bilgisayarda Test
 
-6 farklı tarayıcı sekmesi veya gizli pencere açarak tek başına test edebilirsiniz.
+Farklı tarayıcı sekmeleri veya gizli pencereler açarak tek başına test edebilirsiniz.
+Rol ekranlarını tek panelden izlemek için `http://localhost:3000/test.html` adresindeki test arayüzünü kullanabilirsiniz.

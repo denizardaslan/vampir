@@ -31,6 +31,7 @@ if (!myPlayerId) {
 // ─── Client State ────────────────────────────────────────────────────────────
 let myRole = null;
 let myName = null;
+let myLobbyCode = null;
 let isHost = false;
 let isAlive = true;
 let fellowVampires = [];
@@ -46,6 +47,9 @@ let doctorDone = false;
 let hasVoted = false;
 let pendingVoteTargetId = null;
 let noKillFirstNight = false;
+let withDoctor = true;
+let withSeer = true;
+let vampireCount = 2;
 
 let discussTimerInterval = null;
 let voteTimerInterval = null;
@@ -107,6 +111,7 @@ socket.on('new_session', () => { clearTimeout(_loadingFallback); showScreen('nam
 
 socket.on('reconnected', (data) => {
   clearTimeout(_loadingFallback);
+  myLobbyCode  = data.lobbyCode || myLobbyCode;
   myRole       = data.player.role;
   myName       = data.player.name;
   isHost       = data.player.isHost;
@@ -169,8 +174,15 @@ socket.on('reconnected', (data) => {
 socket.on('lobby_update', (data) => {
   currentPhase = 'lobby';
   if (!myName) return;
+  myLobbyCode = data.lobbyCode || myLobbyCode;
   isHost = data.isHost;
   isAlive = true;
+  if (data.gameState) {
+    withDoctor = data.gameState.withDoctor !== false;
+    withSeer = data.gameState.withSeer !== false;
+    vampireCount = data.gameState.vampireCount || vampireCount;
+    noKillFirstNight = !!data.gameState.noKillFirstNight;
+  }
   if (data.players) setAlivePlayers(data.players);
   showScreen('lobby');
   updateLobbyUI(data);
@@ -331,6 +343,7 @@ socket.on('kicked', () => {
   showToast('Lobi\'den çıkarıldınız.');
   showScreen('name-entry');
   document.getElementById('input-name').value = '';
+  document.getElementById('input-lobby-code').value = '';
   document.getElementById('input-password').value = '';
 });
 
@@ -416,7 +429,7 @@ function showNightScreen() {
 function populateVampireTargets() {
   const list = document.getElementById('vampire-target-list');
   list.innerHTML = '';
-  getAlivePlayers().forEach(p => {
+  getAlivePlayers().filter(p => p.id !== myPlayerId && !fellowVampires.includes(p.name)).forEach(p => {
     const li = makeTargetItem(p, () => {
       myVampireTargetId = p.id;
       document.querySelectorAll('#vampire-target-list .target-item').forEach(el => el.classList.remove('selected'));
@@ -494,9 +507,10 @@ function updateVampireSelectionUI(data) {
   const iAmSelector  = data.confirmedBy?.[0] === myPlayerId;
   const iConfirmed   = data.confirmedBy?.includes(myPlayerId);
   const count        = data.confirmedBy?.length || 0;
+  const needed       = Math.max(1, fellowVampires.length + 1);
 
   if (iAmSelector || iConfirmed) {
-    status.textContent = `${name} seçildi. (${count}/2 onay) Bekleniyor...`;
+    status.textContent = `${name} seçildi. (${count}/${needed} onay) Bekleniyor...`;
     confirmBtn.classList.add('hidden');
     iHaveConfirmed = true;
   } else {
@@ -584,7 +598,23 @@ function populateVoteList(voters) {
 function updateLobbyUI(data) {
   const players = data.players || [];
   const connected = players.filter(p => p.connected !== false);
-  document.getElementById('lobby-count').textContent = `${connected.length} / 6 oyuncu`;
+  document.getElementById('lobby-count').textContent = `${connected.length} oyuncu`;
+
+  const codeLabel = document.getElementById('lobby-code-label');
+  if (codeLabel && data.lobbyCode) {
+    codeLabel.textContent = data.lobbyCode;
+    showEl('lobby-meta');
+  }
+  const passLabel = document.getElementById('lobby-password-label');
+  if (passLabel) {
+    const strong = passLabel.querySelector('strong');
+    if (data.lobbyPassword) {
+      if (strong) strong.textContent = data.lobbyPassword;
+      passLabel.classList.remove('hidden');
+    } else {
+      passLabel.classList.add('hidden');
+    }
+  }
 
   const list = document.getElementById('lobby-player-list');
   list.innerHTML = '';
@@ -605,13 +635,34 @@ function updateLobbyUI(data) {
   if (data.isHost) {
     showEl('host-controls');
     hideEl('lobby-waiting');
+    syncHostControls(data.gameState || {});
     const btn = document.getElementById('btn-start');
-    const canStart = connected.length === 6;
+    const canStart = connected.length >= 3 && connected.length > vampireCount;
     btn.disabled = !canStart;
-    btn.textContent = canStart ? 'Oyunu Başlat!' : `Başlat (${connected.length}/6 oyuncu)`;
+    btn.textContent = canStart ? 'Oyunu Başlat!' : `Başlat (${Math.max(3, vampireCount + 1)}+ oyuncu gerekli)`;
   } else {
     hideEl('host-controls');
     showEl('lobby-waiting');
+  }
+}
+
+function syncHostControls(gameState) {
+  const doctorToggle = document.getElementById('toggle-doctor');
+  const seerToggle = document.getElementById('toggle-seer');
+  const noKillToggle = document.getElementById('toggle-no-kill');
+  if (doctorToggle) doctorToggle.checked = gameState.withDoctor !== false;
+  if (seerToggle) seerToggle.checked = gameState.withSeer !== false;
+  if (noKillToggle) noKillToggle.checked = !!gameState.noKillFirstNight;
+
+  vampireCount = Number(gameState.vampireCount || vampireCount || 2);
+  document.querySelectorAll('.vampire-count-btn').forEach(btn => {
+    btn.classList.toggle('active', Number(btn.dataset.count) === vampireCount);
+  });
+
+  if (gameState.discussDuration) {
+    document.querySelectorAll('.discuss-btn').forEach(btn => {
+      btn.classList.toggle('active', Number(btn.dataset.min) === Number(gameState.discussDuration));
+    });
   }
 }
 
@@ -747,26 +798,82 @@ function stopTimers() {
 }
 
 // ─── UI Event Listeners ───────────────────────────────────────────────────────
-document.getElementById('btn-join').addEventListener('click', () => {
-  const name = document.getElementById('input-name').value.trim();
+function getEntryValues() {
+  return {
+    name: document.getElementById('input-name').value.trim(),
+    lobbyCode: document.getElementById('input-lobby-code').value.trim().toUpperCase(),
+    password: document.getElementById('input-password').value
+  };
+}
+
+document.getElementById('btn-create-lobby').addEventListener('click', () => {
+  const { name, password } = getEntryValues();
   if (!name) { showError('İsim giriniz.', 'error-name'); return; }
-  const password = document.getElementById('input-password').value;
   myName = name;
-  socket.emit('join_lobby', { name, playerId: myPlayerId, password });
+  socket.emit('create_lobby', { name, playerId: myPlayerId, password });
+});
+
+document.getElementById('btn-join').addEventListener('click', () => {
+  const { name, lobbyCode, password } = getEntryValues();
+  if (!name) { showError('İsim giriniz.', 'error-name'); return; }
+  if (!lobbyCode) { showError('Lobi kodu giriniz.', 'error-name'); return; }
+  myName = name;
+  socket.emit('join_lobby', { name, playerId: myPlayerId, lobbyCode, lobbyPassword: password });
 });
 
 document.getElementById('input-name').addEventListener('keydown', e => {
+  if (e.key === 'Enter') document.getElementById('btn-create-lobby').click();
+});
+document.getElementById('input-lobby-code').addEventListener('keydown', e => {
   if (e.key === 'Enter') document.getElementById('btn-join').click();
 });
 document.getElementById('input-password').addEventListener('keydown', e => {
-  if (e.key === 'Enter') document.getElementById('btn-join').click();
+  if (e.key === 'Enter') {
+    const hasCode = !!document.getElementById('input-lobby-code').value.trim();
+    document.getElementById(hasCode ? 'btn-join' : 'btn-create-lobby').click();
+  }
 });
 
 document.getElementById('btn-start').addEventListener('click', () => {
   socket.emit('start_game', {
+    withDoctor: document.getElementById('toggle-doctor').checked,
     withSeer: document.getElementById('toggle-seer').checked,
+    vampireCount,
     noKillFirstNight: document.getElementById('toggle-no-kill').checked
   });
+});
+
+function emitRoleConfig() {
+  if (!isHost) return;
+  socket.emit('set_role_config', {
+    withDoctor: document.getElementById('toggle-doctor').checked,
+    withSeer: document.getElementById('toggle-seer').checked,
+    vampireCount,
+    noKillFirstNight: document.getElementById('toggle-no-kill').checked
+  });
+}
+
+['toggle-doctor', 'toggle-seer', 'toggle-no-kill'].forEach(id => {
+  document.getElementById(id).addEventListener('change', emitRoleConfig);
+});
+
+document.querySelectorAll('.vampire-count-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    vampireCount = Number(btn.dataset.count);
+    document.querySelectorAll('.vampire-count-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    emitRoleConfig();
+  });
+});
+
+document.getElementById('btn-copy-lobby-code').addEventListener('click', async () => {
+  if (!myLobbyCode) return;
+  try {
+    await navigator.clipboard.writeText(myLobbyCode);
+    showToast('Lobi kodu kopyalandı.');
+  } catch (e) {
+    showToast(`Lobi kodu: ${myLobbyCode}`);
+  }
 });
 
 document.querySelectorAll('.discuss-btn').forEach(btn => {

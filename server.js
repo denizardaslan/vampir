@@ -10,19 +10,26 @@ const io = new Server(httpServer);
 
 app.use(express.static(path.join(__dirname, 'public')));
 
-function makeGame() {
+const games = new Map();
+const testDashboardRooms = new Map();
+
+function makeGame({ code, password = '' }) {
   return {
-    phase: 'lobby', // lobby | role_reveal | night | day_reveal | day_discuss | day_vote | game_over
-    players: [],    // [{ id, name, role, alive, socketId, isHost }]
+    code,
+    password,
+    phase: 'lobby',
+    players: [],
+    withDoctor: true,
     withSeer: true,
+    vampireCount: 2,
     noKillFirstNight: false,
     nightActions: {
       vampire: { selectedTarget: null, confirmedBy: [] },
       doctor: { target: null, lastSelfProtect: -2 },
       seer: { target: null, result: null }
     },
-    votes: {},         // { voterId: targetId | 'abstain' }
-    vampireChat: [],   // [{ name, message, timestamp }]
+    votes: {},
+    vampireChat: [],
     dayNumber: 0,
     lastNightDeath: null,
     discussDuration: 5,
@@ -32,75 +39,37 @@ function makeGame() {
   };
 }
 
-let game = makeGame();
+function makeLobbyCode() {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let code = '';
+  do {
+    code = Array.from({ length: 5 }, () => alphabet[randomInt(0, alphabet.length)]).join('');
+  } while (games.has(code));
+  return code;
+}
 
-// ─── Helpers ────────────────────────────────────────────────────────────────
+function normalizeCode(code) {
+  return String(code || '').trim().toUpperCase();
+}
 
-function getAlivePlayers() {
+function getAlivePlayers(game) {
   return game.players.filter(p => p.alive);
 }
 
-function checkWinCondition() {
-  const alive = getAlivePlayers();
-  const vampires = alive.filter(p => p.role === 'vampire');
-  const others = alive.filter(p => p.role !== 'vampire');
-  if (vampires.length === 0) return 'villagers';
-  if (vampires.length >= others.length) return 'vampires';
+function findGameByPlayerId(playerId) {
+  for (const game of games.values()) {
+    const player = game.players.find(p => p.id === playerId);
+    if (player) return { game, player };
+  }
   return null;
 }
 
-function getAllRoles() {
-  return game.players.map(p => ({ id: p.id, name: p.name, role: p.role, alive: p.alive }));
-}
-
-function notifyVampires(event, data) {
-  game.players
-    .filter(p => p.role === 'vampire' && p.alive)
-    .forEach(p => {
-      const s = io.sockets.sockets.get(p.socketId);
-      if (s) s.emit(event, data);
-    });
-}
-
-function sendSpectatorUpdate() {
-  const dead = game.players.filter(p => !p.alive);
-  if (dead.length === 0) return;
-  const data = buildSpectatorData();
-  dead.forEach(p => {
-    const s = io.sockets.sockets.get(p.socketId);
-    if (s) s.emit('spectator_update', data);
-  });
-}
-
-function buildSpectatorData() {
-  return {
-    players: getAllRoles(),
-    phase: game.phase,
-    nightActions: {
-      vampireTarget: game.nightActions.vampire.selectedTarget
-        ? game.players.find(p => p.id === game.nightActions.vampire.selectedTarget)?.name
-        : null,
-      confirmedCount: game.nightActions.vampire.confirmedBy.length,
-      doctorTarget: game.nightActions.doctor.target
-        ? game.players.find(p => p.id === game.nightActions.doctor.target)?.name
-        : null,
-      seerTarget: game.nightActions.seer.target
-        ? game.players.find(p => p.id === game.nightActions.seer.target)?.name
-        : null,
-      seerResult: game.nightActions.seer.result
-    },
-    votes: Object.entries(game.votes).reduce((acc, [vid, tid]) => {
-      const voter = game.players.find(p => p.id === vid);
-      const target = game.players.find(p => p.id === tid);
-      acc.push({ voter: voter?.name, target: target?.name ?? tid });
-      return acc;
-    }, []),
-    vampireChat: game.vampireChat
-  };
-}
-
-function playerName(id) {
-  return game.players.find(p => p.id === id)?.name || null;
+function findGameBySocket(socket) {
+  for (const game of games.values()) {
+    const player = game.players.find(p => p.socketId === socket.id);
+    if (player) return { game, player };
+  }
+  return null;
 }
 
 function roleLabel(role) {
@@ -119,8 +88,323 @@ function phaseLabel(phase) {
   }[phase] || phase;
 }
 
-function getPlayerScreen(player) {
-  if (!player) return { screen: 'Bilinmiyor', headline: 'Oyuncu yok', detail: '' };
+function playerName(game, id) {
+  return game.players.find(p => p.id === id)?.name || null;
+}
+
+function getAllRoles(game) {
+  return game.players.map(p => ({ id: p.id, name: p.name, role: p.role, alive: p.alive }));
+}
+
+function getLobbyPlayers(game) {
+  return game.players.map(p => ({
+    id: p.id,
+    name: p.name,
+    isHost: p.isHost,
+    connected: !p.disconnected,
+    alive: p.alive
+  }));
+}
+
+function getRoleConfig(game) {
+  return {
+    withDoctor: game.withDoctor,
+    withSeer: game.withSeer,
+    vampireCount: game.vampireCount,
+    noKillFirstNight: game.noKillFirstNight,
+    discussDuration: game.discussDuration
+  };
+}
+
+function buildRoles(game) {
+  const playerCount = game.players.length;
+  const vampireCount = Math.min(game.vampireCount, Math.max(1, playerCount - 1));
+  const roles = Array.from({ length: vampireCount }, () => 'vampire');
+  if (game.withDoctor && roles.length < playerCount) roles.push('doctor');
+  if (game.withSeer && roles.length < playerCount) roles.push('seer');
+  while (roles.length < playerCount) roles.push('villager');
+  return roles;
+}
+
+function validateStartConfig(game) {
+  const connectedCount = game.players.filter(p => !p.disconnected).length;
+  if (connectedCount !== game.players.length) return 'Bağlantısı kopmuş oyuncu varken oyun başlatılamaz.';
+  if (game.players.length < 3) return 'Oyunu başlatmak için en az 3 oyuncu gerekli.';
+  if (game.vampireCount < 1 || game.vampireCount > 3) return 'Vampir sayısı 1, 2 veya 3 olmalı.';
+  if (game.vampireCount >= game.players.length) return 'Vampir sayısı oyuncu sayısından az olmalı.';
+  return null;
+}
+
+function shuffle(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = randomInt(0, i + 1);
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+function emitToPlayer(player, event, data) {
+  const socket = io.sockets.sockets.get(player.socketId);
+  if (socket) socket.emit(event, data);
+}
+
+function notifyVampires(game, event, data) {
+  game.players
+    .filter(p => p.role === 'vampire' && p.alive)
+    .forEach(p => emitToPlayer(p, event, data));
+}
+
+function sendLobbyUpdate(game) {
+  const players = getLobbyPlayers(game);
+  game.players.forEach(p => {
+    emitToPlayer(p, 'lobby_update', {
+      lobbyCode: game.code,
+      lobbyPassword: p.isHost ? game.password : null,
+      players,
+      isHost: p.isHost,
+      gameState: { phase: game.phase, ...getRoleConfig(game) }
+    });
+  });
+  sendTestDashboardUpdate(game);
+}
+
+function buildSpectatorData(game) {
+  return {
+    lobbyCode: game.code,
+    players: getAllRoles(game),
+    phase: game.phase,
+    nightActions: {
+      vampireTarget: playerName(game, game.nightActions.vampire.selectedTarget),
+      confirmedCount: game.nightActions.vampire.confirmedBy.length,
+      doctorTarget: playerName(game, game.nightActions.doctor.target),
+      seerTarget: playerName(game, game.nightActions.seer.target),
+      seerResult: game.nightActions.seer.result
+    },
+    votes: Object.entries(game.votes).map(([vid, tid]) => {
+      const voter = game.players.find(p => p.id === vid);
+      return { voter: voter?.name, target: tid === 'abstain' ? 'Çekimser' : playerName(game, tid) };
+    }),
+    vampireChat: game.vampireChat
+  };
+}
+
+function sendSpectatorUpdate(game) {
+  const dead = game.players.filter(p => !p.alive);
+  if (!dead.length) return;
+  const data = buildSpectatorData(game);
+  dead.forEach(p => emitToPlayer(p, 'spectator_update', data));
+}
+
+function checkWinCondition(game) {
+  const alive = getAlivePlayers(game);
+  const vampires = alive.filter(p => p.role === 'vampire');
+  const others = alive.filter(p => p.role !== 'vampire');
+  if (vampires.length === 0) return 'villagers';
+  if (vampires.length >= others.length) return 'vampires';
+  return null;
+}
+
+function finishGame(game, winner, delay = 0) {
+  game.winner = winner;
+  game.phase = 'game_over';
+  if (game.discussTimer) clearTimeout(game.discussTimer);
+  if (game.voteTimer) clearTimeout(game.voteTimer);
+  setTimeout(() => {
+    io.to(game.code).emit('game_over', { winner, allRoles: getAllRoles(game) });
+    sendTestDashboardUpdate(game);
+  }, delay);
+}
+
+function startNight(game) {
+  game.dayNumber++;
+  game.phase = 'night';
+  const prevLastSelfProtect = game.nightActions.doctor.lastSelfProtect;
+  game.nightActions = {
+    vampire: { selectedTarget: null, confirmedBy: [] },
+    doctor: { target: null, lastSelfProtect: prevLastSelfProtect },
+    seer: { target: null, result: null }
+  };
+  game.vampireChat = [];
+  game.votes = {};
+
+  io.to(game.code).emit('phase_change', {
+    phase: 'night',
+    data: {
+      dayNumber: game.dayNumber,
+      alivePlayers: getAlivePlayers(game).map(p => ({ id: p.id, name: p.name })),
+      noKillFirstNight: game.noKillFirstNight
+    }
+  });
+  sendSpectatorUpdate(game);
+  sendTestDashboardUpdate(game);
+}
+
+function checkNightComplete(game) {
+  if (game.phase !== 'night') return;
+
+  const alive = getAlivePlayers(game);
+  const vampires = alive.filter(p => p.role === 'vampire');
+  const doctor = game.withDoctor ? alive.find(p => p.role === 'doctor') : null;
+  const seer = game.withSeer ? alive.find(p => p.role === 'seer') : null;
+  const firstNightSkip = game.noKillFirstNight && game.dayNumber === 1;
+
+  const vampireDone = firstNightSkip || vampires.length === 0
+    ? true
+    : game.nightActions.vampire.selectedTarget !== null
+      && game.nightActions.vampire.confirmedBy.length >= vampires.length;
+  const doctorDone = firstNightSkip || !doctor || game.nightActions.doctor.target !== null;
+  const seerDone = !seer || game.nightActions.seer.target !== null;
+
+  if (vampireDone && doctorDone && seerDone) resolveNight(game);
+}
+
+function resolveNight(game) {
+  const vampireTargetId = game.nightActions.vampire.selectedTarget;
+  const doctorTargetId = game.nightActions.doctor.target;
+
+  let newLastSelfProtect = game.nightActions.doctor.lastSelfProtect;
+  if (doctorTargetId) {
+    const doc = game.players.find(p => p.role === 'doctor' && p.alive);
+    if (doc && doctorTargetId === doc.id) newLastSelfProtect = game.dayNumber;
+  }
+
+  let death = null;
+  const firstNightNoKill = game.noKillFirstNight && game.dayNumber === 1;
+  if (!firstNightNoKill && vampireTargetId && vampireTargetId !== doctorTargetId) {
+    const victim = game.players.find(p => p.id === vampireTargetId && p.alive);
+    if (victim) {
+      victim.alive = false;
+      death = { name: victim.name, role: victim.role };
+    }
+  }
+
+  game.lastNightDeath = death;
+  game.nightActions.doctor.lastSelfProtect = newLastSelfProtect;
+  game.phase = 'day_reveal';
+
+  const revealData = death
+    ? { deathName: death.name, deathRole: death.role }
+    : { deathName: null, deathRole: null };
+
+  io.to(game.code).emit('phase_change', { phase: 'day_reveal', data: revealData });
+  sendSpectatorUpdate(game);
+  sendTestDashboardUpdate(game);
+
+  const winner = checkWinCondition(game);
+  if (winner) {
+    finishGame(game, winner, 4000);
+    return;
+  }
+
+  setTimeout(() => startDiscuss(game), 5000);
+}
+
+function startDiscuss(game) {
+  if (game.phase !== 'day_reveal') return;
+  game.phase = 'day_discuss';
+  game.discussStartTime = Date.now();
+  if (game.discussTimer) clearTimeout(game.discussTimer);
+
+  io.to(game.code).emit('phase_change', {
+    phase: 'day_discuss',
+    data: { duration: game.discussDuration, dayNumber: game.dayNumber, remainingSeconds: game.discussDuration * 60 }
+  });
+  sendSpectatorUpdate(game);
+  sendTestDashboardUpdate(game);
+
+  game.discussTimer = setTimeout(() => startVoting(game), game.discussDuration * 60 * 1000);
+}
+
+function startVoting(game) {
+  if (game.phase !== 'day_discuss') return;
+  if (game.discussTimer) { clearTimeout(game.discussTimer); game.discussTimer = null; }
+
+  game.phase = 'day_vote';
+  game.votes = {};
+
+  const alive = getAlivePlayers(game);
+  io.to(game.code).emit('phase_change', {
+    phase: 'day_vote',
+    data: { voters: alive.map(p => ({ id: p.id, name: p.name })) }
+  });
+  sendSpectatorUpdate(game);
+  sendTestDashboardUpdate(game);
+
+  if (game.voteTimer) clearTimeout(game.voteTimer);
+  game.voteTimer = setTimeout(() => resolveVoting(game), 60 * 1000);
+}
+
+function resolveVoting(game) {
+  if (game.voteTimer) { clearTimeout(game.voteTimer); game.voteTimer = null; }
+  if (game.phase !== 'day_vote') return;
+
+  const alive = getAlivePlayers(game);
+  const voteCounts = {};
+
+  for (const voter of alive) {
+    const vote = game.votes[voter.id];
+    if (vote && vote !== 'abstain') voteCounts[vote] = (voteCounts[vote] || 0) + 1;
+  }
+
+  let maxVotes = 0;
+  let topPlayers = [];
+  for (const [pid, count] of Object.entries(voteCounts)) {
+    if (count > maxVotes) { maxVotes = count; topPlayers = [pid]; }
+    else if (count === maxVotes) topPlayers.push(pid);
+  }
+
+  const voteBreakdown = alive.map(p => ({ id: p.id, name: p.name, votes: voteCounts[p.id] || 0 }));
+  let hangedName = null;
+  let hangedRole = null;
+
+  if (topPlayers.length === 1 && maxVotes > 0) {
+    const hanged = game.players.find(p => p.id === topPlayers[0]);
+    if (hanged && hanged.alive) {
+      hanged.alive = false;
+      hangedName = hanged.name;
+      hangedRole = hanged.role;
+    }
+  }
+
+  io.to(game.code).emit('vote_result', { hangedName, hangedRole, voteBreakdown });
+  sendSpectatorUpdate(game);
+  sendTestDashboardUpdate(game);
+
+  const winner = checkWinCondition(game);
+  if (winner) {
+    finishGame(game, winner, 4000);
+    return;
+  }
+
+  if (game.dayNumber >= 10) {
+    finishGame(game, 'draw', 4000);
+    return;
+  }
+
+  setTimeout(() => startNight(game), 4000);
+}
+
+function getPhaseData(game) {
+  switch (game.phase) {
+    case 'night':
+      return { dayNumber: game.dayNumber };
+    case 'day_reveal':
+      return game.lastNightDeath
+        ? { deathName: game.lastNightDeath.name, deathRole: game.lastNightDeath.role }
+        : { deathName: null, deathRole: null };
+    case 'day_discuss': {
+      const elapsed = game.discussStartTime ? Math.floor((Date.now() - game.discussStartTime) / 1000) : 0;
+      const remaining = Math.max(0, game.discussDuration * 60 - elapsed);
+      return { duration: game.discussDuration, dayNumber: game.dayNumber, remainingSeconds: remaining };
+    }
+    case 'day_vote':
+      return { voters: getAlivePlayers(game).map(p => ({ id: p.id, name: p.name })) };
+    default:
+      return {};
+  }
+}
+
+function getPlayerScreen(game, player) {
   if (!player.alive && game.phase !== 'game_over') {
     return {
       screen: 'İzleyici',
@@ -134,14 +418,14 @@ function getPlayerScreen(player) {
       return {
         screen: 'Lobi',
         headline: player.isHost ? 'Host kontrol paneli açık' : 'Host oyunu başlatana kadar bekliyor',
-        detail: `${game.players.filter(p => !p.disconnected).length} / 6 oyuncu lobide.`
+        detail: `${game.players.filter(p => !p.disconnected).length} oyuncu lobide.`
       };
     case 'role_reveal':
       return {
         screen: 'Rol Açıklaması',
         headline: `Rolünü görür: ${roleLabel(player.role)}`,
         detail: player.role === 'vampire'
-          ? `Diğer vampir: ${game.players.filter(p => p.role === 'vampire' && p.id !== player.id).map(p => p.name).join(', ') || '-'}`
+          ? `Diğer vampirler: ${game.players.filter(p => p.role === 'vampire' && p.id !== player.id).map(p => p.name).join(', ') || '-'}`
           : 'Gece başlamadan önce rol kartı gösterilir.'
       };
     case 'night': {
@@ -152,14 +436,14 @@ function getPlayerScreen(player) {
           headline: firstNightSkip ? 'İlk gece öldürme kapalı' : 'Kurban seçimi ekranında',
           detail: firstNightSkip
             ? 'Vampir sohbeti açık, hedef seçimi gizli.'
-            : `Hedef: ${playerName(game.nightActions.vampire.selectedTarget) || 'seçilmedi'}; onay: ${game.nightActions.vampire.confirmedBy.length}/${getAlivePlayers().filter(p => p.role === 'vampire').length}`
+            : `Hedef: ${playerName(game, game.nightActions.vampire.selectedTarget) || 'seçilmedi'}; onay: ${game.nightActions.vampire.confirmedBy.length}/${getAlivePlayers(game).filter(p => p.role === 'vampire').length}`
         };
       }
       if (player.role === 'doctor') {
         return {
           screen: 'Gece - Doktor',
           headline: firstNightSkip ? 'İlk gece koruma kapalı' : 'Korunacak kişiyi seçer',
-          detail: firstNightSkip ? 'Sabahı bekler.' : `Koruma: ${playerName(game.nightActions.doctor.target) || 'seçilmedi'}`
+          detail: firstNightSkip ? 'Sabahı bekler.' : `Koruma: ${playerName(game, game.nightActions.doctor.target) || 'seçilmedi'}`
         };
       }
       if (player.role === 'seer') {
@@ -168,15 +452,11 @@ function getPlayerScreen(player) {
           screen: 'Gece - Kahin',
           headline: 'Sorgulanacak kişiyi seçer',
           detail: game.nightActions.seer.target
-            ? `${playerName(game.nightActions.seer.target)} sonucu: ${result ? (result.isVampire ? 'Vampir' : 'Temiz') : 'bekleniyor'}`
+            ? `${playerName(game, game.nightActions.seer.target)} sonucu: ${result ? (result.isVampire ? 'Vampir' : 'Temiz') : 'bekleniyor'}`
             : 'Henüz seçim yapılmadı.'
         };
       }
-      return {
-        screen: 'Gece - Köylü',
-        headline: 'Uyuyor',
-        detail: 'Gece aksiyonu yok.'
-      };
+      return { screen: 'Gece - Köylü', headline: 'Uyuyor', detail: 'Gece aksiyonu yok.' };
     }
     case 'day_reveal':
       return {
@@ -195,26 +475,36 @@ function getPlayerScreen(player) {
       return {
         screen: 'Oylama',
         headline: vote ? 'Oyunu kullandı' : 'Oy hedefi seçer',
-        detail: vote ? `Oy: ${vote === 'abstain' ? 'Çekimser' : playerName(vote)}` : `${Object.keys(game.votes).length}/${getAlivePlayers().length} oy kullanıldı.`
+        detail: vote ? `Oy: ${vote === 'abstain' ? 'Çekimser' : playerName(game, vote)}` : `${Object.keys(game.votes).length}/${getAlivePlayers(game).length} oy kullanıldı.`
       };
     }
     case 'game_over':
-      return {
-        screen: 'Oyun Sonu',
-        headline: `Kazanan: ${game.winner || '-'}`,
-        detail: 'Tüm roller görünür.'
-      };
+      return { screen: 'Oyun Sonu', headline: `Kazanan: ${game.winner || '-'}`, detail: 'Tüm roller görünür.' };
     default:
       return { screen: phaseLabel(game.phase), headline: '', detail: '' };
   }
 }
 
-function buildTestDashboardData() {
+function buildTestDashboardData(game) {
+  if (!game) {
+    return {
+      lobbyCode: null,
+      phase: 'none',
+      phaseLabel: 'Lobi yok',
+      dayNumber: 0,
+      players: [],
+      lobbies: Array.from(games.values()).map(g => ({ code: g.code, players: g.players.length, phase: g.phase }))
+    };
+  }
+
   return {
+    lobbyCode: game.code,
     phase: game.phase,
     phaseLabel: phaseLabel(game.phase),
     dayNumber: game.dayNumber,
+    withDoctor: game.withDoctor,
     withSeer: game.withSeer,
+    vampireCount: game.vampireCount,
     noKillFirstNight: game.noKillFirstNight,
     winner: game.winner,
     players: game.players.map(p => ({
@@ -225,248 +515,380 @@ function buildTestDashboardData() {
       alive: p.alive,
       isHost: p.isHost,
       connected: !p.disconnected && !!p.socketId,
-      screen: getPlayerScreen(p)
+      screen: getPlayerScreen(game, p)
     })),
-    spectator: buildSpectatorData()
+    spectator: buildSpectatorData(game),
+    lobbies: Array.from(games.values()).map(g => ({ code: g.code, players: g.players.length, phase: g.phase }))
   };
 }
 
-function sendTestDashboardUpdate() {
-  io.to('test-dashboard').emit('test_dashboard_update', buildTestDashboardData());
-}
-
-function sendLobbyUpdate() {
-  const players = game.players.map(p => ({
-    id: p.id, name: p.name, isHost: p.isHost,
-    connected: !p.disconnected
-  }));
-  game.players.forEach(p => {
-    const s = io.sockets.sockets.get(p.socketId);
-    if (s) {
-      s.emit('lobby_update', {
-        players,
-        isHost: p.isHost,
-        gameState: { phase: game.phase, discussDuration: game.discussDuration, noKillFirstNight: game.noKillFirstNight }
-      });
-    }
+function sendTestDashboardUpdate(game) {
+  const rooms = game ? [game.code] : Array.from(testDashboardRooms.keys());
+  rooms.forEach(code => {
+    const room = `test-dashboard:${code}`;
+    io.to(room).emit('test_dashboard_update', buildTestDashboardData(games.get(code) || null));
   });
-  sendTestDashboardUpdate();
 }
 
-// ─── Phase Logic ─────────────────────────────────────────────────────────────
+function attachPlayerToGame(socket, game, player) {
+  if (player.removeTimer) {
+    clearTimeout(player.removeTimer);
+    player.removeTimer = null;
+  }
+  player.disconnected = false;
+  player.socketId = socket.id;
+  socket.join(game.code);
+}
 
-function startNight() {
-  game.dayNumber++;
-  game.phase = 'night';
-  const prevLastSelfProtect = game.nightActions.doctor.lastSelfProtect;
-  game.nightActions = {
-    vampire: { selectedTarget: null, confirmedBy: [] },
-    doctor: { target: null, lastSelfProtect: prevLastSelfProtect },
-    seer: { target: null, result: null }
-  };
-  game.vampireChat = [];
-  game.votes = {};
-
-  io.emit('phase_change', {
-    phase: 'night',
-    data: {
-      dayNumber: game.dayNumber,
-      alivePlayers: getAlivePlayers().map(p => ({ id: p.id, name: p.name })),
-      noKillFirstNight: game.noKillFirstNight
-    }
+function emitReconnect(socket, game, player) {
+  socket.emit('reconnected', {
+    lobbyCode: game.code,
+    phase: game.phase,
+    player: {
+      id: player.id,
+      name: player.name,
+      role: player.role,
+      alive: player.alive,
+      isHost: player.isHost
+    },
+    fellowVampires: player.role === 'vampire'
+      ? game.players.filter(p => p.role === 'vampire' && p.id !== player.id).map(p => p.name)
+      : [],
+    nightData: player.role === 'vampire' && game.phase === 'night' ? {
+      vampireChat: game.vampireChat,
+      selection: {
+        targetId: game.nightActions.vampire.selectedTarget,
+        confirmedBy: game.nightActions.vampire.confirmedBy
+      }
+    } : null,
+    seerResult: player.role === 'seer' && game.nightActions.seer.result ? game.nightActions.seer.result : null,
+    phaseData: getPhaseData(game),
+    allRoles: game.phase === 'game_over' ? getAllRoles(game) : null,
+    winner: game.winner,
+    alivePlayers: getAlivePlayers(game).map(p => ({ id: p.id, name: p.name }))
   });
-  sendSpectatorUpdate();
-  sendTestDashboardUpdate();
-}
 
-function checkNightComplete() {
-  if (game.phase !== 'night') return;
-
-  const alive = getAlivePlayers();
-  const vampires = alive.filter(p => p.role === 'vampire');
-  const doctor = alive.find(p => p.role === 'doctor');
-  const seer = game.withSeer ? alive.find(p => p.role === 'seer') : null;
-
-  // İlk gece öldürme yoksa vampir ve doktor beklenmez, sadece kahin
-  const firstNightSkip = game.noKillFirstNight && game.dayNumber === 1;
-
-  let vampireDone;
-  if (firstNightSkip || vampires.length === 0) {
-    vampireDone = true;
-  } else if (vampires.length === 1) {
-    vampireDone = game.nightActions.vampire.selectedTarget !== null;
-  } else {
-    vampireDone = game.nightActions.vampire.selectedTarget !== null
-      && game.nightActions.vampire.confirmedBy.length >= vampires.length;
-  }
-
-  const doctorDone = firstNightSkip || !doctor || game.nightActions.doctor.target !== null;
-  // Kahin oyundaysa ve hayattaysa mutlaka seçim yapmalı
-  const seerDone = !seer || game.nightActions.seer.target !== null;
-
-  console.log(`[Gece ${game.dayNumber}] vampir:${vampireDone} doktor:${doctorDone} kahin:${seerDone} (withSeer:${game.withSeer})`);
-
-  if (vampireDone && doctorDone && seerDone) {
-    resolveNight();
+  if (!player.alive) {
+    setTimeout(() => emitToPlayer(player, 'spectator_update', buildSpectatorData(game)), 200);
   }
 }
 
-function resolveNight() {
-  const vampireTargetId = game.nightActions.vampire.selectedTarget;
-  const doctorTargetId = game.nightActions.doctor.target;
+function createLobby(socket, { name, playerId, password }) {
+  const trimmed = String(name || '').trim();
+  if (!trimmed) { socket.emit('error', { message: 'İsim boş olamaz.' }); return; }
 
-  // Doctor self-protect tracking
-  let newLastSelfProtect = game.nightActions.doctor.lastSelfProtect;
-  if (doctorTargetId) {
-    const doc = game.players.find(p => p.role === 'doctor' && p.alive);
-    if (doc && doctorTargetId === doc.id) {
-      newLastSelfProtect = game.dayNumber;
-    }
-  }
+  const code = makeLobbyCode();
+  const game = makeGame({ code, password: String(password || '').trim() });
+  games.set(code, game);
+  const player = { id: playerId, name: trimmed, role: null, alive: true, socketId: socket.id, isHost: true };
+  game.players.push(player);
+  attachPlayerToGame(socket, game, player);
+  sendLobbyUpdate(game);
+}
 
-  let death = null;
-  const firstNightNoKill = game.noKillFirstNight && game.dayNumber === 1;
-  if (!firstNightNoKill && vampireTargetId && vampireTargetId !== doctorTargetId) {
-    const victim = game.players.find(p => p.id === vampireTargetId && p.alive);
-    if (victim) {
-      victim.alive = false;
-      death = { name: victim.name, role: victim.role };
-    }
-  }
-
-  game.lastNightDeath = death;
-  game.nightActions.doctor.lastSelfProtect = newLastSelfProtect;
-
-  game.phase = 'day_reveal';
-  const revealData = death
-    ? { deathName: death.name, deathRole: death.role }
-    : { deathName: null, deathRole: null };
-
-  io.emit('phase_change', { phase: 'day_reveal', data: revealData });
-  sendSpectatorUpdate();
-  sendTestDashboardUpdate();
-
-  const winner = checkWinCondition();
-  if (winner) {
-    game.winner = winner;
-    game.phase = 'game_over';
-    setTimeout(() => {
-      io.emit('game_over', { winner, allRoles: getAllRoles() });
-    }, 4000);
+function joinLobby(socket, { name, playerId, lobbyCode, lobbyPassword }) {
+  const code = normalizeCode(lobbyCode);
+  const game = games.get(code);
+  if (!game) { socket.emit('error', { message: 'Lobi bulunamadı.' }); return; }
+  if (game.phase !== 'lobby') { socket.emit('error', { message: 'Bu lobide oyun başlamış.' }); return; }
+  if (game.password && game.password !== String(lobbyPassword || '').trim()) {
+    socket.emit('error', { message: 'Lobi şifresi yanlış.' });
     return;
   }
 
-  setTimeout(() => startDiscuss(), 5000);
-}
+  const trimmed = String(name || '').trim();
+  if (!trimmed) { socket.emit('error', { message: 'İsim boş olamaz.' }); return; }
 
-function startDiscuss() {
-  if (game.phase !== 'day_reveal') return;
-  game.phase = 'day_discuss';
-  game.discussStartTime = Date.now();
-  if (game.discussTimer) clearTimeout(game.discussTimer);
-
-  io.emit('phase_change', {
-    phase: 'day_discuss',
-    data: { duration: game.discussDuration, dayNumber: game.dayNumber, remainingSeconds: game.discussDuration * 60 }
-  });
-  sendSpectatorUpdate();
-  sendTestDashboardUpdate();
-
-  game.discussTimer = setTimeout(() => startVoting(), game.discussDuration * 60 * 1000);
-}
-
-function startVoting() {
-  if (game.phase !== 'day_discuss') return;
-  if (game.discussTimer) { clearTimeout(game.discussTimer); game.discussTimer = null; }
-
-  game.phase = 'day_vote';
-  game.votes = {};
-
-  const alive = getAlivePlayers();
-  io.emit('phase_change', {
-    phase: 'day_vote',
-    data: { voters: alive.map(p => ({ id: p.id, name: p.name })) }
-  });
-  sendSpectatorUpdate();
-  sendTestDashboardUpdate();
-
-  if (game.voteTimer) clearTimeout(game.voteTimer);
-  game.voteTimer = setTimeout(() => resolveVoting(), 60 * 1000);
-}
-
-function resolveVoting() {
-  if (game.voteTimer) { clearTimeout(game.voteTimer); game.voteTimer = null; }
-  if (game.phase !== 'day_vote') return;
-
-  const alive = getAlivePlayers();
-  const voteCounts = {};
-
-  for (const voter of alive) {
-    const vote = game.votes[voter.id];
-    if (vote && vote !== 'abstain') {
-      voteCounts[vote] = (voteCounts[vote] || 0) + 1;
-    }
-  }
-
-  let maxVotes = 0;
-  let topPlayers = [];
-  for (const [pid, count] of Object.entries(voteCounts)) {
-    if (count > maxVotes) { maxVotes = count; topPlayers = [pid]; }
-    else if (count === maxVotes) topPlayers.push(pid);
-  }
-
-  const voteBreakdown = alive.map(p => ({
-    id: p.id, name: p.name, votes: voteCounts[p.id] || 0
-  }));
-
-  let hangedName = null, hangedRole = null;
-
-  if (topPlayers.length === 1 && maxVotes > 0) {
-    const hanged = game.players.find(p => p.id === topPlayers[0]);
-    if (hanged && hanged.alive) {
-      hanged.alive = false;
-      hangedName = hanged.name;
-      hangedRole = hanged.role;
-    }
-  }
-
-  io.emit('vote_result', { hangedName, hangedRole, voteBreakdown });
-  sendSpectatorUpdate();
-  sendTestDashboardUpdate();
-
-  const winner = checkWinCondition();
-  if (winner) {
-    game.winner = winner;
-    game.phase = 'game_over';
-    setTimeout(() => io.emit('game_over', { winner, allRoles: getAllRoles() }), 4000);
+  const ghost = game.players.find(p => p.id === playerId && p.disconnected);
+  if (ghost) {
+    ghost.name = trimmed;
+    attachPlayerToGame(socket, game, ghost);
+    sendLobbyUpdate(game);
     return;
   }
 
-  if (game.dayNumber >= 10) {
-    game.phase = 'game_over';
-    setTimeout(() => io.emit('game_over', { winner: 'draw', allRoles: getAllRoles() }), 4000);
+  if (game.players.some(p => p.name.toLowerCase() === trimmed.toLowerCase())) {
+    socket.emit('error', { message: 'Bu isim bu lobide kullanılıyor.' });
     return;
   }
 
-  setTimeout(() => startNight(), 4000);
+  const player = { id: playerId, name: trimmed, role: null, alive: true, socketId: socket.id, isHost: false };
+  game.players.push(player);
+  attachPlayerToGame(socket, game, player);
+  sendLobbyUpdate(game);
 }
-
-// ─── Socket.IO ───────────────────────────────────────────────────────────────
 
 io.on('connection', (socket) => {
+  socket.on('hello', ({ playerId }) => {
+    const found = findGameByPlayerId(playerId);
+    if (!found) {
+      socket.emit('new_session', {});
+      return;
+    }
 
-  socket.on('test_observe', () => {
-    socket.join('test-dashboard');
-    socket.emit('test_dashboard_update', buildTestDashboardData());
+    const { game, player } = found;
+    const prevSocket = io.sockets.sockets.get(player.socketId);
+    if (prevSocket && prevSocket.id !== socket.id) {
+      socket.emit('new_session', {});
+      return;
+    }
+
+    attachPlayerToGame(socket, game, player);
+    emitReconnect(socket, game, player);
+    sendLobbyUpdate(game);
   });
 
-  socket.on('test_seed_lobby', () => {
+  socket.on('create_lobby', (data) => createLobby(socket, data));
+  socket.on('join_lobby', (data) => joinLobby(socket, data));
+
+  socket.on('kick_player', ({ targetId }) => {
+    const found = findGameBySocket(socket);
+    if (!found) return;
+    const { game, player } = found;
+    if (!player.isHost || game.phase !== 'lobby') return;
+    const target = game.players.find(p => p.id === targetId);
+    if (!target || target.isHost) return;
+
+    game.players = game.players.filter(p => p.id !== targetId);
+    emitToPlayer(target, 'kicked');
+    sendLobbyUpdate(game);
+  });
+
+  socket.on('set_role_config', ({ withDoctor, withSeer, vampireCount, noKillFirstNight }) => {
+    const found = findGameBySocket(socket);
+    if (!found) return;
+    const { game, player } = found;
+    if (!player.isHost || game.phase !== 'lobby') return;
+    game.withDoctor = !!withDoctor;
+    game.withSeer = !!withSeer;
+    game.vampireCount = Math.max(1, Math.min(3, Number(vampireCount) || 1));
+    game.noKillFirstNight = !!noKillFirstNight;
+    sendLobbyUpdate(game);
+  });
+
+  socket.on('set_discuss_duration', ({ minutes }) => {
+    const found = findGameBySocket(socket);
+    if (!found) return;
+    const { game, player } = found;
+    if (!player.isHost) return;
+    if ([3, 5, 7].includes(minutes)) game.discussDuration = minutes;
+    sendLobbyUpdate(game);
+  });
+
+  socket.on('start_game', ({ withDoctor, withSeer, vampireCount, noKillFirstNight } = {}) => {
+    const found = findGameBySocket(socket);
+    if (!found) return;
+    const { game, player } = found;
+    if (!player.isHost) { socket.emit('error', { message: 'Sadece host oyunu başlatabilir.' }); return; }
+    if (game.phase !== 'lobby') return;
+
+    game.withDoctor = withDoctor !== undefined ? !!withDoctor : game.withDoctor;
+    game.withSeer = withSeer !== undefined ? !!withSeer : game.withSeer;
+    game.vampireCount = vampireCount !== undefined ? Math.max(1, Math.min(3, Number(vampireCount) || 1)) : game.vampireCount;
+    game.noKillFirstNight = noKillFirstNight !== undefined ? !!noKillFirstNight : game.noKillFirstNight;
+
+    const validationError = validateStartConfig(game);
+    if (validationError) { socket.emit('error', { message: validationError }); return; }
+
+    const roles = shuffle(buildRoles(game));
+    game.players.forEach((p, i) => { p.role = roles[i]; p.alive = true; });
+    const vampireNames = game.players.filter(p => p.role === 'vampire').map(p => p.name);
+    game.phase = 'role_reveal';
+
+    game.players.forEach(p => {
+      emitToPlayer(p, 'role_assigned', {
+        role: p.role,
+        fellowVampires: p.role === 'vampire' ? vampireNames.filter(n => n !== p.name) : []
+      });
+    });
+
+    io.to(game.code).emit('phase_change', { phase: 'role_reveal', data: {} });
+    sendTestDashboardUpdate(game);
+    setTimeout(() => startNight(game), 5000);
+  });
+
+  socket.on('vampire_select', ({ targetId }) => {
+    const found = findGameBySocket(socket);
+    if (!found) return;
+    const { game, player } = found;
+    if (game.phase !== 'night' || player.role !== 'vampire' || !player.alive) return;
+    const target = game.players.find(p => p.id === targetId && p.alive && p.role !== 'vampire');
+    if (!target) return;
+
+    const aliveVampires = getAlivePlayers(game).filter(p => p.role === 'vampire');
+    game.nightActions.vampire.selectedTarget = targetId;
+    game.nightActions.vampire.confirmedBy = [player.id];
+
+    notifyVampires(game, 'vampire_selection_update', {
+      targetId,
+      confirmedBy: game.nightActions.vampire.confirmedBy,
+      autoConfirmed: aliveVampires.length === 1
+    });
+    if (aliveVampires.length === 1) game.nightActions.vampire.confirmedBy = aliveVampires.map(p => p.id);
+    sendSpectatorUpdate(game);
+    sendTestDashboardUpdate(game);
+    if (aliveVampires.length === 1) checkNightComplete(game);
+  });
+
+  socket.on('vampire_confirm', () => {
+    const found = findGameBySocket(socket);
+    if (!found) return;
+    const { game, player } = found;
+    if (game.phase !== 'night' || player.role !== 'vampire' || !player.alive) return;
+    if (!game.nightActions.vampire.selectedTarget) return;
+
+    if (!game.nightActions.vampire.confirmedBy.includes(player.id)) {
+      game.nightActions.vampire.confirmedBy.push(player.id);
+    }
+
+    const aliveVampires = getAlivePlayers(game).filter(p => p.role === 'vampire');
+    notifyVampires(game, 'vampire_selection_update', {
+      targetId: game.nightActions.vampire.selectedTarget,
+      confirmedBy: game.nightActions.vampire.confirmedBy,
+      autoConfirmed: false
+    });
+    sendSpectatorUpdate(game);
+    sendTestDashboardUpdate(game);
+
+    if (game.nightActions.vampire.confirmedBy.length >= aliveVampires.length) checkNightComplete(game);
+  });
+
+  socket.on('vampire_message', ({ text }) => {
+    const found = findGameBySocket(socket);
+    if (!found) return;
+    const { game, player } = found;
+    if (game.phase !== 'night' || player.role !== 'vampire' || !player.alive) return;
+    const trimmed = String(text || '').trim();
+    if (!trimmed) return;
+
+    game.vampireChat.push({ name: player.name, message: trimmed, timestamp: Date.now() });
+    notifyVampires(game, 'vampire_chat_update', { messages: game.vampireChat });
+    sendTestDashboardUpdate(game);
+  });
+
+  socket.on('doctor_select', ({ targetId }) => {
+    const found = findGameBySocket(socket);
+    if (!found) return;
+    const { game, player } = found;
+    if (game.phase !== 'night' || player.role !== 'doctor' || !player.alive) return;
+
+    if (targetId === player.id && game.nightActions.doctor.lastSelfProtect === game.dayNumber - 1) {
+      socket.emit('error', { message: 'Art arda iki gece kendinizi koruyamazsınız.' });
+      return;
+    }
+    if (!game.players.find(p => p.id === targetId && p.alive)) return;
+
+    game.nightActions.doctor.target = targetId;
+    socket.emit('doctor_confirmed', { targetName: playerName(game, targetId) });
+    sendSpectatorUpdate(game);
+    sendTestDashboardUpdate(game);
+    checkNightComplete(game);
+  });
+
+  socket.on('seer_select', ({ targetId }) => {
+    const found = findGameBySocket(socket);
+    if (!found) return;
+    const { game, player } = found;
+    if (game.phase !== 'night' || player.role !== 'seer' || !player.alive) return;
+
+    const target = game.players.find(p => p.id === targetId && p.alive && p.id !== player.id);
+    if (!target) return;
+
+    game.nightActions.seer.target = targetId;
+    const result = { targetName: target.name, isVampire: target.role === 'vampire' };
+    game.nightActions.seer.result = result;
+    socket.emit('seer_result', result);
+    sendSpectatorUpdate(game);
+    sendTestDashboardUpdate(game);
+    setTimeout(() => checkNightComplete(game), 3000);
+  });
+
+  socket.on('cast_vote', ({ targetId }) => {
+    const found = findGameBySocket(socket);
+    if (!found) return;
+    const { game, player } = found;
+    if (game.phase !== 'day_vote' || !player.alive) return;
+
+    game.votes[player.id] = targetId;
+    const alive = getAlivePlayers(game);
+    const votedCount = Object.keys(game.votes).length;
+    const voteList = Object.entries(game.votes).map(([vid, tid]) => ({
+      voterName: playerName(game, vid),
+      targetName: tid === 'abstain' ? 'Çekimser' : playerName(game, tid)
+    }));
+    io.to(game.code).emit('vote_update', { votedCount, totalVoters: alive.length, votes: voteList });
+    sendSpectatorUpdate(game);
+    sendTestDashboardUpdate(game);
+
+    if (votedCount >= alive.length) resolveVoting(game);
+  });
+
+  socket.on('start_voting', () => {
+    const found = findGameBySocket(socket);
+    if (!found) return;
+    const { game, player } = found;
+    if (!player.isHost || game.phase !== 'day_discuss') return;
+    startVoting(game);
+  });
+
+  socket.on('force_end_game', () => {
+    const found = findGameBySocket(socket);
+    if (!found) return;
+    const { game, player } = found;
+    if (!player.isHost || game.phase === 'lobby' || game.phase === 'game_over') return;
+    finishGame(game, 'ended');
+  });
+
+  socket.on('new_game', () => {
+    const found = findGameBySocket(socket);
+    if (!found) return;
+    const { game, player } = found;
+    if (!player.isHost || game.phase !== 'game_over') return;
+
     if (game.discussTimer) clearTimeout(game.discussTimer);
     if (game.voteTimer) clearTimeout(game.voteTimer);
-    game = makeGame();
-    const names = ['Ada', 'Bora', 'Cem', 'Derya', 'Ece', 'Fırat'];
-    game.players = names.map((name, index) => ({
-      id: `test-${index + 1}`,
+    game.phase = 'lobby';
+    game.players.forEach(p => {
+      p.role = null;
+      p.alive = true;
+      p.disconnected = false;
+    });
+    game.nightActions = {
+      vampire: { selectedTarget: null, confirmedBy: [] },
+      doctor: { target: null, lastSelfProtect: -2 },
+      seer: { target: null, result: null }
+    };
+    game.votes = {};
+    game.vampireChat = [];
+    game.dayNumber = 0;
+    game.lastNightDeath = null;
+    game.winner = null;
+    sendLobbyUpdate(game);
+  });
+
+  socket.on('test_observe', ({ lobbyCode } = {}) => {
+    const code = normalizeCode(lobbyCode) || Array.from(games.keys())[0] || null;
+    if (!code) {
+      socket.emit('test_dashboard_update', buildTestDashboardData(null));
+      return;
+    }
+    const room = `test-dashboard:${code}`;
+    socket.join(room);
+    testDashboardRooms.set(code, room);
+    socket.emit('test_dashboard_update', buildTestDashboardData(games.get(code) || null));
+  });
+
+  socket.on('test_seed_lobby', ({ playerCount = 6, withDoctor = true, withSeer = true, vampireCount = 2, noKillFirstNight = false } = {}) => {
+    const code = makeLobbyCode();
+    const game = makeGame({ code, password: 'demo' });
+    game.withDoctor = !!withDoctor;
+    game.withSeer = !!withSeer;
+    game.vampireCount = Math.max(1, Math.min(3, Number(vampireCount) || 2));
+    game.noKillFirstNight = !!noKillFirstNight;
+    const names = ['Ada', 'Bora', 'Cem', 'Derya', 'Ece', 'Fırat', 'Güneş', 'Hale', 'Işık', 'Jale'];
+    const count = Math.max(3, Math.min(10, Number(playerCount) || 6));
+    game.players = names.slice(0, count).map((name, index) => ({
+      id: `test-${code}-${index + 1}`,
       name,
       role: null,
       alive: true,
@@ -474,36 +896,35 @@ io.on('connection', (socket) => {
       isHost: index === 0,
       disconnected: false
     }));
-    sendLobbyUpdate();
-    sendTestDashboardUpdate();
+    games.set(code, game);
+    socket.join(`test-dashboard:${code}`);
+    testDashboardRooms.set(code, `test-dashboard:${code}`);
+    socket.emit('test_dashboard_update', buildTestDashboardData(game));
   });
 
-  socket.on('test_start_game', ({ withSeer = true, noKillFirstNight = false } = {}) => {
-    if (game.phase !== 'lobby') return;
-    if (game.players.length !== 6) return;
-
+  socket.on('test_start_game', ({ lobbyCode, withDoctor = true, withSeer = true, vampireCount = 2, noKillFirstNight = false } = {}) => {
+    const game = games.get(normalizeCode(lobbyCode)) || Array.from(games.values()).at(-1);
+    if (!game || game.phase !== 'lobby') return;
+    game.withDoctor = !!withDoctor;
     game.withSeer = !!withSeer;
+    game.vampireCount = Math.max(1, Math.min(3, Number(vampireCount) || 2));
     game.noKillFirstNight = !!noKillFirstNight;
-
-    const roles = ['vampire', 'vampire', 'doctor',
-      ...(game.withSeer ? ['seer', 'villager', 'villager'] : ['villager', 'villager', 'villager'])];
-    for (let i = roles.length - 1; i > 0; i--) {
-      const j = randomInt(0, i + 1);
-      [roles[i], roles[j]] = [roles[j], roles[i]];
-    }
+    const validationError = validateStartConfig(game);
+    if (validationError) return;
+    const roles = shuffle(buildRoles(game));
     game.players.forEach((p, i) => { p.role = roles[i]; p.alive = true; });
     game.phase = 'role_reveal';
-    io.emit('phase_change', { phase: 'role_reveal', data: {} });
-    sendTestDashboardUpdate();
-    setTimeout(() => startNight(), 5000);
+    sendTestDashboardUpdate(game);
+    setTimeout(() => startNight(game), 5000);
   });
 
-  socket.on('test_auto_night', () => {
-    if (game.phase !== 'night') return;
-    const alive = getAlivePlayers();
+  socket.on('test_auto_night', ({ lobbyCode } = {}) => {
+    const game = games.get(normalizeCode(lobbyCode)) || Array.from(games.values()).at(-1);
+    if (!game || game.phase !== 'night') return;
+    const alive = getAlivePlayers(game);
     const firstNightSkip = game.noKillFirstNight && game.dayNumber === 1;
     const vampires = alive.filter(p => p.role === 'vampire');
-    const doctor = alive.find(p => p.role === 'doctor');
+    const doctor = game.withDoctor ? alive.find(p => p.role === 'doctor') : null;
     const seer = game.withSeer ? alive.find(p => p.role === 'seer') : null;
 
     if (!firstNightSkip && vampires.length > 0 && !game.nightActions.vampire.selectedTarget) {
@@ -524,378 +945,49 @@ io.on('connection', (socket) => {
         game.nightActions.seer.result = { targetName: target.name, isVampire: target.role === 'vampire' };
       }
     }
-    sendSpectatorUpdate();
-    sendTestDashboardUpdate();
-    checkNightComplete();
+    sendSpectatorUpdate(game);
+    sendTestDashboardUpdate(game);
+    checkNightComplete(game);
   });
 
-  socket.on('test_auto_vote', () => {
-    if (game.phase === 'day_discuss') startVoting();
+  socket.on('test_auto_vote', ({ lobbyCode } = {}) => {
+    const game = games.get(normalizeCode(lobbyCode)) || Array.from(games.values()).at(-1);
+    if (!game) return;
+    if (game.phase === 'day_discuss') startVoting(game);
     if (game.phase !== 'day_vote') return;
-    const alive = getAlivePlayers();
+    const alive = getAlivePlayers(game);
     const target = alive.find(p => p.role === 'vampire') || alive[0];
     if (!target) return;
-    alive.forEach(p => {
-      game.votes[p.id] = p.id === target.id ? 'abstain' : target.id;
-    });
+    alive.forEach(p => { game.votes[p.id] = p.id === target.id ? 'abstain' : target.id; });
     const voteList = Object.entries(game.votes).map(([vid, tid]) => ({
-      voterName: game.players.find(p => p.id === vid)?.name,
-      targetName: tid === 'abstain' ? 'Çekimser' : game.players.find(p => p.id === tid)?.name
+      voterName: playerName(game, vid),
+      targetName: tid === 'abstain' ? 'Çekimser' : playerName(game, tid)
     }));
-    io.emit('vote_update', { votedCount: alive.length, totalVoters: alive.length, votes: voteList });
-    sendSpectatorUpdate();
-    sendTestDashboardUpdate();
-    resolveVoting();
-  });
-
-  socket.on('hello', ({ playerId }) => {
-    const existing = game.players.find(p => p.id === playerId);
-    if (existing) {
-      // Eğer aynı ID için başka bir aktif socket varsa → yeni oturum aç
-      const prevSocket = io.sockets.sockets.get(existing.socketId);
-      if (prevSocket && prevSocket.id !== socket.id) {
-        socket.emit('new_session', {});
-        return;
-      }
-
-      // Lobby'de "bağlantı kesik" timer varsa iptal et
-      if (existing.removeTimer) {
-        clearTimeout(existing.removeTimer);
-        existing.removeTimer = null;
-      }
-      existing.disconnected = false;
-      existing.socketId = socket.id;
-      socket.emit('reconnected', {
-        phase: game.phase,
-        player: {
-          id: existing.id, name: existing.name, role: existing.role,
-          alive: existing.alive, isHost: existing.isHost
-        },
-        fellowVampires: existing.role === 'vampire'
-          ? game.players.filter(p => p.role === 'vampire' && p.id !== existing.id).map(p => p.name)
-          : [],
-        nightData: existing.role === 'vampire' && game.phase === 'night' ? {
-          vampireChat: game.vampireChat,
-          selection: {
-            targetId: game.nightActions.vampire.selectedTarget,
-            confirmedBy: game.nightActions.vampire.confirmedBy
-          }
-        } : null,
-        seerResult: existing.role === 'seer' && game.nightActions.seer.result
-          ? game.nightActions.seer.result
-          : null,
-        phaseData: getPhaseData(),
-        allRoles: game.phase === 'game_over' ? getAllRoles() : null,
-        winner: game.winner,
-        alivePlayers: getAlivePlayers().map(p => ({ id: p.id, name: p.name }))
-      });
-
-      if (!existing.alive) {
-        setTimeout(() => {
-          const s = io.sockets.sockets.get(existing.socketId);
-          if (s) s.emit('spectator_update', buildSpectatorData());
-        }, 200);
-      }
-    } else {
-      socket.emit('new_session', {});
-    }
-  });
-
-  socket.on('join_lobby', ({ name, playerId, password }) => {
-    if (game.phase !== 'lobby') {
-      socket.emit('error', { message: 'Oyun zaten başlamış.' });
-      return;
-    }
-
-    const trimmed = (name || '').trim();
-    if (!trimmed) { socket.emit('error', { message: 'İsim boş olamaz.' }); return; }
-
-    // "Bağlantı kesilmiş" ama hâlâ kayıtlı oyuncuyu restore et
-    const ghost = game.players.find(p => p.id === playerId && p.disconnected);
-    if (ghost) {
-      if (ghost.removeTimer) { clearTimeout(ghost.removeTimer); ghost.removeTimer = null; }
-      ghost.disconnected = false;
-      ghost.socketId = socket.id;
-      ghost.name = trimmed;
-      sendLobbyUpdate();
-      return;
-    }
-
-    if (game.players.length >= 6) {
-      socket.emit('error', { message: 'Oyun dolu (maksimum 6 kişi).' });
-      return;
-    }
-    if (game.players.some(p => p.name.toLowerCase() === trimmed.toLowerCase())) {
-      socket.emit('error', { message: 'Bu isim zaten kullanılıyor.' }); return;
-    }
-
-    // Şifre "1" ise host ol (başka host yoksa)
-    const wantsHost = password === '1';
-    const hostTaken = game.players.some(p => p.isHost);
-    if (wantsHost && hostTaken) {
-      socket.emit('error', { message: 'Host zaten var, şifresiz katıl.' }); return;
-    }
-    const isHost = wantsHost;
-    game.players.push({ id: playerId, name: trimmed, role: null, alive: true, socketId: socket.id, isHost });
-    sendLobbyUpdate();
-  });
-
-  socket.on('kick_player', ({ targetId }) => {
-    const player = game.players.find(p => p.socketId === socket.id);
-    if (!player?.isHost || game.phase !== 'lobby') return;
-    const target = game.players.find(p => p.id === targetId);
-    if (!target || target.isHost) return; // host kendini veya başka hostu atamaz
-
-    game.players = game.players.filter(p => p.id !== targetId);
-    const targetSocket = io.sockets.sockets.get(target.socketId);
-    if (targetSocket) targetSocket.emit('kicked');
-    sendLobbyUpdate();
-  });
-
-  socket.on('start_game', ({ withSeer, noKillFirstNight }) => {
-    const player = game.players.find(p => p.socketId === socket.id);
-    if (!player?.isHost) { socket.emit('error', { message: 'Sadece host oyunu başlatabilir.' }); return; }
-    if (game.players.length !== 6) { socket.emit('error', { message: '6 oyuncu gerekli.' }); return; }
-    if (game.phase !== 'lobby') return;
-
-    game.withSeer = withSeer;
-    game.noKillFirstNight = !!noKillFirstNight;
-
-    const roles = ['vampire', 'vampire', 'doctor',
-      ...(withSeer ? ['seer', 'villager', 'villager'] : ['villager', 'villager', 'villager'])];
-
-    // Fisher-Yates shuffle (crypto.randomInt — OS-level entropy)
-    for (let i = roles.length - 1; i > 0; i--) {
-      const j = randomInt(0, i + 1);
-      [roles[i], roles[j]] = [roles[j], roles[i]];
-    }
-
-    game.players.forEach((p, i) => { p.role = roles[i]; p.alive = true; });
-
-    const vampireNames = game.players.filter(p => p.role === 'vampire').map(p => p.name);
-
-    game.phase = 'role_reveal';
-
-    game.players.forEach(p => {
-      const s = io.sockets.sockets.get(p.socketId);
-      if (s) {
-        s.emit('role_assigned', {
-          role: p.role,
-          fellowVampires: p.role === 'vampire' ? vampireNames.filter(n => n !== p.name) : []
-        });
-      }
-    });
-
-    io.emit('phase_change', { phase: 'role_reveal', data: {} });
-    sendTestDashboardUpdate();
-    setTimeout(() => startNight(), 5000);
-  });
-
-  socket.on('vampire_select', ({ targetId }) => {
-    if (game.phase !== 'night') return;
-    const player = game.players.find(p => p.socketId === socket.id);
-    if (!player || player.role !== 'vampire' || !player.alive) return;
-    if (!game.players.find(p => p.id === targetId && p.alive)) return;
-
-    const aliveVampires = game.players.filter(p => p.role === 'vampire' && p.alive);
-    game.nightActions.vampire.selectedTarget = targetId;
-    game.nightActions.vampire.confirmedBy = [player.id];
-
-    if (aliveVampires.length === 1) {
-      notifyVampires('vampire_selection_update', {
-        targetId, confirmedBy: game.nightActions.vampire.confirmedBy, autoConfirmed: true
-      });
-      sendSpectatorUpdate();
-      sendTestDashboardUpdate();
-      checkNightComplete();
-    } else {
-      notifyVampires('vampire_selection_update', {
-        targetId, confirmedBy: game.nightActions.vampire.confirmedBy, autoConfirmed: false
-      });
-      sendSpectatorUpdate();
-      sendTestDashboardUpdate();
-    }
-  });
-
-  socket.on('vampire_confirm', () => {
-    if (game.phase !== 'night') return;
-    const player = game.players.find(p => p.socketId === socket.id);
-    if (!player || player.role !== 'vampire' || !player.alive) return;
-    if (!game.nightActions.vampire.selectedTarget) return;
-
-    if (!game.nightActions.vampire.confirmedBy.includes(player.id)) {
-      game.nightActions.vampire.confirmedBy.push(player.id);
-    }
-
-    const aliveVampires = game.players.filter(p => p.role === 'vampire' && p.alive);
-    notifyVampires('vampire_selection_update', {
-      targetId: game.nightActions.vampire.selectedTarget,
-      confirmedBy: game.nightActions.vampire.confirmedBy,
-      autoConfirmed: false
-    });
-    sendSpectatorUpdate();
-    sendTestDashboardUpdate();
-
-    if (game.nightActions.vampire.confirmedBy.length >= aliveVampires.length) {
-      checkNightComplete();
-    }
-  });
-
-  socket.on('vampire_message', ({ text }) => {
-    if (game.phase !== 'night') return;
-    const player = game.players.find(p => p.socketId === socket.id);
-    if (!player || player.role !== 'vampire' || !player.alive) return;
-    const trimmed = (text || '').trim();
-    if (!trimmed) return;
-
-    const msg = { name: player.name, message: trimmed, timestamp: Date.now() };
-    game.vampireChat.push(msg);
-    notifyVampires('vampire_chat_update', { messages: game.vampireChat });
-    sendTestDashboardUpdate();
-  });
-
-  socket.on('doctor_select', ({ targetId }) => {
-    if (game.phase !== 'night') return;
-    const player = game.players.find(p => p.socketId === socket.id);
-    if (!player || player.role !== 'doctor' || !player.alive) return;
-
-    if (targetId === player.id && game.nightActions.doctor.lastSelfProtect === game.dayNumber - 1) {
-      socket.emit('error', { message: 'Art arda iki gece kendinizi koruyamazsınız.' });
-      return;
-    }
-
-    if (!game.players.find(p => p.id === targetId && p.alive)) return;
-
-    game.nightActions.doctor.target = targetId;
-    const targetName = game.players.find(p => p.id === targetId)?.name;
-    socket.emit('doctor_confirmed', { targetName });
-    sendSpectatorUpdate();
-    sendTestDashboardUpdate();
-    checkNightComplete();
-  });
-
-  socket.on('seer_select', ({ targetId }) => {
-    if (game.phase !== 'night') return;
-    const player = game.players.find(p => p.socketId === socket.id);
-    if (!player || player.role !== 'seer' || !player.alive) return;
-
-    const target = game.players.find(p => p.id === targetId && p.alive && p.id !== player.id);
-    if (!target) return;
-
-    game.nightActions.seer.target = targetId;
-    const result = { targetName: target.name, isVampire: target.role === 'vampire' };
-    game.nightActions.seer.result = result;
-    socket.emit('seer_result', result);
-    sendSpectatorUpdate();
-    sendTestDashboardUpdate();
-    // Kahin sonucu okusun, 3 saniye sonra gece kontrolü
-    setTimeout(() => checkNightComplete(), 3000);
-  });
-
-  socket.on('cast_vote', ({ targetId }) => {
-    if (game.phase !== 'day_vote') return;
-    const player = game.players.find(p => p.socketId === socket.id);
-    if (!player || !player.alive) return;
-
-    game.votes[player.id] = targetId;
-
-    const alive = getAlivePlayers();
-    const votedCount = Object.keys(game.votes).length;
-    const voteList = Object.entries(game.votes).map(([vid, tid]) => ({
-      voterName: game.players.find(p => p.id === vid)?.name,
-      targetName: tid === 'abstain' ? 'Çekimser' : game.players.find(p => p.id === tid)?.name
-    }));
-    io.emit('vote_update', { votedCount, totalVoters: alive.length, votes: voteList });
-    sendSpectatorUpdate();
-    sendTestDashboardUpdate();
-
-    if (votedCount >= alive.length) {
-      if (game.voteTimer) { clearTimeout(game.voteTimer); game.voteTimer = null; }
-      resolveVoting();
-    }
-  });
-
-  socket.on('start_voting', () => {
-    const player = game.players.find(p => p.socketId === socket.id);
-    if (!player?.isHost || game.phase !== 'day_discuss') return;
-    startVoting();
-  });
-
-  socket.on('set_discuss_duration', ({ minutes }) => {
-    const player = game.players.find(p => p.socketId === socket.id);
-    if (!player?.isHost) return;
-    if ([3, 5, 7].includes(minutes)) game.discussDuration = minutes;
-  });
-
-  socket.on('force_end_game', () => {
-    const player = game.players.find(p => p.socketId === socket.id);
-    if (!player?.isHost) return;
-    if (game.phase === 'lobby' || game.phase === 'game_over') return;
-    if (game.discussTimer) clearTimeout(game.discussTimer);
-    if (game.voteTimer)    clearTimeout(game.voteTimer);
-    game.phase = 'game_over';
-    game.winner = 'ended';
-    io.emit('game_over', { winner: 'ended', allRoles: getAllRoles() });
-    sendTestDashboardUpdate();
-  });
-
-  socket.on('new_game', () => {
-    const player = game.players.find(p => p.socketId === socket.id);
-    if (!player?.isHost || game.phase !== 'game_over') return;
-
-    if (game.discussTimer) clearTimeout(game.discussTimer);
-    if (game.voteTimer) clearTimeout(game.voteTimer);
-
-    const survivors = game.players.map(p => ({
-      id: p.id, name: p.name, socketId: p.socketId,
-      isHost: p.isHost, role: null, alive: true
-    }));
-    game = makeGame();
-    game.players = survivors;
-
-    sendLobbyUpdate();
+    io.to(game.code).emit('vote_update', { votedCount: alive.length, totalVoters: alive.length, votes: voteList });
+    sendSpectatorUpdate(game);
+    sendTestDashboardUpdate(game);
+    resolveVoting(game);
   });
 
   socket.on('disconnect', () => {
-    const player = game.players.find(p => p.socketId === socket.id);
-    if (!player) return;
+    const found = findGameBySocket(socket);
+    if (!found) return;
+    const { game, player } = found;
 
     if (game.phase === 'lobby') {
-      // 30 saniye bekle, reconnect etmezse çıkar. Host kalıcı — transfer yok.
       player.disconnected = true;
-      sendLobbyUpdate();
+      sendLobbyUpdate(game);
       player.removeTimer = setTimeout(() => {
         game.players = game.players.filter(p => p.id !== player.id);
-        sendLobbyUpdate();
+        if (player.isHost && game.players.length) game.players[0].isHost = true;
+        if (!game.players.length) games.delete(game.code);
+        else sendLobbyUpdate(game);
       }, 30000);
     }
-    // Oyun sırasında: hiçbir şey yapma, oyuncu reconnect eder.
-    // Host kalıcıdır — transfer edilmez.
   });
 });
 
-function getPhaseData() {
-  switch (game.phase) {
-    case 'night':
-      return { dayNumber: game.dayNumber };
-    case 'day_reveal':
-      return game.lastNightDeath
-        ? { deathName: game.lastNightDeath.name, deathRole: game.lastNightDeath.role }
-        : { deathName: null, deathRole: null };
-    case 'day_discuss': {
-      const elapsed = game.discussStartTime ? Math.floor((Date.now() - game.discussStartTime) / 1000) : 0;
-      const remaining = Math.max(0, game.discussDuration * 60 - elapsed);
-      return { duration: game.discussDuration, dayNumber: game.dayNumber, remainingSeconds: remaining };
-    }
-    case 'day_vote':
-      return { voters: getAlivePlayers().map(p => ({ id: p.id, name: p.name })) };
-    default:
-      return {};
-  }
-}
-
 const PORT = Number(process.env.PORT || 3000);
-
 httpServer.listen(PORT, '0.0.0.0', () => {
   console.log(`\nVampir Köylü sunucu çalışıyor!`);
   console.log(`  Yerel:   http://localhost:${PORT}`);

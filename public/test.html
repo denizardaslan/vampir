@@ -21,6 +21,22 @@
         <span id="phase-label">Bağlanıyor</span>
         <small id="day-label"></small>
       </div>
+      <label class="field-row">
+        Oyuncu
+        <input type="number" id="test-player-count" min="3" max="10" value="6">
+      </label>
+      <label class="field-row">
+        Vampir
+        <select id="test-vampire-count">
+          <option value="1">1</option>
+          <option value="2" selected>2</option>
+          <option value="3">3</option>
+        </select>
+      </label>
+      <label class="check-row">
+        <input type="checkbox" id="test-with-doctor" checked>
+        Doktor var
+      </label>
       <label class="check-row">
         <input type="checkbox" id="test-with-seer" checked>
         Kahin var

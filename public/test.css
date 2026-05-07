@@ -104,7 +104,8 @@ h2 { margin-bottom: 12px; font-size: 1rem; }
   font-weight: 700;
 }
 
-.check-row {
+.check-row,
+.field-row {
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -112,6 +113,18 @@ h2 { margin-bottom: 12px; font-size: 1rem; }
   padding: 0 10px;
   color: var(--muted);
   font-weight: 700;
+}
+
+.field-row input,
+.field-row select {
+  width: 64px;
+  height: 32px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font-weight: 800;
+  text-align: center;
 }
 
 .overview-grid {
