@@ -337,6 +337,7 @@ function startNight(game, expectedPhase = null) {
   });
   sendSpectatorUpdate(game);
   sendTestDashboardUpdate(game);
+  checkNightComplete(game);
 }
 
 function checkNightComplete(game) {
@@ -1161,6 +1162,7 @@ module.exports = {
   games,
   makeGame,
   buildRoles,
+  shuffle,
   validateStartConfig,
   sanitizeName,
   sanitizeLobbyName,

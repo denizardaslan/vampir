@@ -5,13 +5,16 @@ const {
   MAX_PLAYERS,
   httpServer,
   makeGame,
+  buildRoles,
+  shuffle,
   validateStartConfig,
   sanitizeName,
   sanitizeLobbyName,
   sanitizePassword,
   sanitizeChat,
   isSafePlayerId,
-  startNight
+  startNight,
+  clearGameTimers
 } = require('../server');
 
 after(() => {
@@ -96,6 +99,56 @@ describe('phase guards', () => {
 
     assert.equal(game.phase, 'game_over');
     assert.equal(game.dayNumber, 3);
+  });
+
+  it('automatically resolves first night when no first-night actions are required', () => {
+    const game = configuredGame({ players: 3, vampireCount: 1, withDoctor: false, withSeer: false });
+    game.noKillFirstNight = true;
+    game.phase = 'role_reveal';
+    game.players[0].role = 'vampire';
+    game.players[1].role = 'villager';
+    game.players[2].role = 'villager';
+
+    startNight(game, 'role_reveal');
+
+    assert.equal(game.dayNumber, 1);
+    assert.equal(game.phase, 'day_reveal');
+    assert.equal(game.lastNightDeath, null);
+    clearGameTimers(game);
+  });
+
+  it('still waits for seer when seer is the only first-night action', () => {
+    const game = configuredGame({ players: 3, vampireCount: 1, withDoctor: false, withSeer: true });
+    game.noKillFirstNight = true;
+    game.phase = 'role_reveal';
+    game.players[0].role = 'vampire';
+    game.players[1].role = 'seer';
+    game.players[2].role = 'villager';
+
+    startNight(game, 'role_reveal');
+
+    assert.equal(game.dayNumber, 1);
+    assert.equal(game.phase, 'night');
+    clearGameTimers(game);
+  });
+});
+
+describe('role assignment randomness', () => {
+  it('builds the requested role multiset before shuffling', () => {
+    const game = configuredGame({ players: 6, vampireCount: 2, withDoctor: true, withSeer: true });
+
+    assert.deepEqual(buildRoles(game).sort(), ['doctor', 'seer', 'vampire', 'vampire', 'villager', 'villager'].sort());
+  });
+
+  it('uses shuffle so role order is not fixed to player order', () => {
+    const originalOrder = ['vampire', 'doctor', 'seer', 'villager', 'villager'];
+    const seenOrders = new Set();
+
+    for (let i = 0; i < 200; i++) {
+      seenOrders.add(shuffle([...originalOrder]).join(','));
+    }
+
+    assert.ok(seenOrders.size > 1);
   });
 });
 
