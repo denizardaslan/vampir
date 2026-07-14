@@ -27,6 +27,7 @@ if (!myPlayerId) {
   myPlayerId = generateUUID();
   storageSet('vk_player_id', myPlayerId);
 }
+let reconnectToken = storageGet('vk_reconnect_token');
 
 // ─── Client State ────────────────────────────────────────────────────────────
 let myRole = null;
@@ -70,7 +71,7 @@ const _loadingFallback = setTimeout(() => {
   }
 }, 2000);
 
-socket.on('connect', () => socket.emit('hello', { playerId: myPlayerId }));
+socket.on('connect', () => socket.emit('hello', { playerId: myPlayerId, reconnectToken }));
 
 socket.on('connect_error', () => {
   clearTimeout(_loadingFallback);
@@ -128,6 +129,10 @@ socket.on('reconnected', (data) => {
   myName       = data.player.name;
   isHost       = data.player.isHost;
   isAlive      = data.player.alive;
+  if (data.reconnectToken) {
+    reconnectToken = data.reconnectToken;
+    storageSet('vk_reconnect_token', reconnectToken);
+  }
   fellowVampires = data.fellowVampires || [];
   currentPhase = data.phase;
 
@@ -186,6 +191,10 @@ socket.on('reconnected', (data) => {
 socket.on('lobby_update', (data) => {
   currentPhase = 'lobby';
   if (!myName) return;
+  if (data.reconnectToken) {
+    reconnectToken = data.reconnectToken;
+    storageSet('vk_reconnect_token', reconnectToken);
+  }
   myLobbyCode = data.lobbyCode || myLobbyCode;
   isHost = data.isHost;
   isAlive = true;
@@ -299,7 +308,7 @@ socket.on('vote_update', (data) => {
   if (!el) return;
   let html = `<div class="vote-count">${data.votedCount} / ${data.totalVoters} oy kullandı</div>`;
   if (data.votes?.length) {
-    html += `<ul class="live-votes">${data.votes.map(v => `<li>${v.voterName} → <strong>${v.targetName}</strong></li>`).join('')}</ul>`;
+    html += `<ul class="live-votes">${data.votes.map(v => `<li>${escHtml(v.voterName)} → <strong>${escHtml(v.targetName)}</strong></li>`).join('')}</ul>`;
   }
   el.innerHTML = html;
 });
@@ -314,8 +323,8 @@ socket.on('vote_result', (data) => {
     showDeathFlash(isSelf, data.hangedName, 'hanged', () => {
       const el = document.getElementById('vote-progress');
       if (el) {
-        el.innerHTML = `<div class="reveal-death"><span class="death-icon">🪦</span><strong>${data.hangedName}</strong> asıldı.</div>`;
-        const bd = data.voteBreakdown.map(v => `<li>${v.name}: <b>${v.votes}</b> oy</li>`).join('');
+        el.innerHTML = `<div class="reveal-death"><span class="death-icon">🪦</span><strong>${escHtml(data.hangedName)}</strong> asıldı.</div>`;
+        const bd = data.voteBreakdown.map(v => `<li>${escHtml(v.name)}: <b>${v.votes}</b> oy</li>`).join('');
         el.innerHTML += `<ul class="vote-breakdown">${bd}</ul>`;
       }
       hideEl('vote-selection');
@@ -329,7 +338,7 @@ socket.on('vote_result', (data) => {
     const el = document.getElementById('vote-progress');
     if (el) {
       el.innerHTML = `<div class="reveal-safe"><span>🤝</span> Eşit oy — kimse asılmadı.</div>`;
-      const bd = data.voteBreakdown.map(v => `<li>${v.name}: <b>${v.votes}</b> oy</li>`).join('');
+      const bd = data.voteBreakdown.map(v => `<li>${escHtml(v.name)}: <b>${v.votes}</b> oy</li>`).join('');
       el.innerHTML += `<ul class="vote-breakdown">${bd}</ul>`;
     }
     hideEl('vote-selection');
@@ -351,6 +360,8 @@ socket.on('kicked', () => {
   isHost = false;
   storageSet('vk_player_id', generateUUID()); // yeni ID al, lobiye taze giriş
   myPlayerId = storageGet('vk_player_id');
+  reconnectToken = null;
+  storageSet('vk_reconnect_token', '');
   showToast('Lobi\'den çıkarıldınız.');
   showLobbyBrowser();
 });
@@ -542,8 +553,8 @@ function showSeerResult(data) {
   if (!el) return;
   el.classList.remove('hidden');
   el.innerHTML = data.isVampire
-    ? `<span class="seer-vampire">🧛 ${data.targetName} VAMPİR!</span>`
-    : `<span class="seer-safe">✅ ${data.targetName} vampir değil.</span>`;
+    ? `<span class="seer-vampire">🧛 ${escHtml(data.targetName)} VAMPİR!</span>`
+    : `<span class="seer-safe">✅ ${escHtml(data.targetName)} vampir değil.</span>`;
 }
 
 function showDeathFlash(isSelf, name, verb, callback) {
@@ -574,7 +585,7 @@ function showRevealContent(data) {
     el.innerHTML =
       `<div class="reveal-death">
         <div class="death-icon-big">🩸</div>
-        <h2>${data.deathName}</h2>
+        <h2>${escHtml(data.deathName)}</h2>
         <p>bu gece öldürüldü.</p>
       </div>`;
   } else {
@@ -634,8 +645,8 @@ function updateLobbyUI(data) {
     const li = document.createElement('li');
     li.className = disc ? 'player-disconnected' : '';
     li.innerHTML = `
-      <span>${p.name}${p.isHost ? ' <span class="host-badge">Host</span>' : ''}${disc ? ' <span class="disc-badge">⏳</span>' : ''}</span>
-      ${data.isHost && !p.isHost ? `<button class="btn btn-sm btn-kick" data-id="${p.id}">Çıkar</button>` : ''}
+      <span>${escHtml(p.name)}${p.isHost ? ' <span class="host-badge">Host</span>' : ''}${disc ? ' <span class="disc-badge">⏳</span>' : ''}</span>
+      ${data.isHost && !p.isHost ? `<button class="btn btn-sm btn-kick" data-id="${escHtml(p.id)}">Çıkar</button>` : ''}
     `;
     list.appendChild(li);
   });
@@ -707,6 +718,7 @@ function joinSelectedLobby(password) {
   socket.emit('join_lobby', {
     name: myName,
     playerId: myPlayerId,
+    reconnectToken,
     lobbyId: pendingJoinLobbyId,
     lobbyPassword: password
   });
@@ -737,7 +749,7 @@ function updateVampireChat(messages) {
     const el = document.getElementById(id);
     if (!el) return;
     el.innerHTML = messages.map(m =>
-      `<div class="chat-msg"><span class="chat-name">${m.name}:</span> ${escHtml(m.message)}</div>`
+      `<div class="chat-msg"><span class="chat-name">${escHtml(m.name)}:</span> ${escHtml(m.message)}</div>`
     ).join('');
     el.scrollTop = el.scrollHeight;
   });
@@ -750,7 +762,7 @@ function updateSpectatorUI(data) {
   if (pList) {
     pList.innerHTML = (data.players || []).map(p =>
       `<li class="role-item ${p.alive ? '' : 'dead'}">
-        <span class="player-name">${p.name}</span>
+        <span class="player-name">${escHtml(p.name)}</span>
         <span class="role-badge role-${p.role}">${roleLabel(p.role)}</span>
         ${p.alive ? '' : '<span class="dead-label">✝</span>'}
       </li>`
@@ -763,12 +775,12 @@ function updateSpectatorUI(data) {
     const items = [];
     if (na.vampireTarget) {
       const c = na.confirmedCount >= 2 ? '✓ onaylandı' : '⏳ bekleniyor';
-      items.push(`<li>🧛 Hedef: <strong>${na.vampireTarget}</strong> — ${c}</li>`);
+      items.push(`<li>🧛 Hedef: <strong>${escHtml(na.vampireTarget)}</strong> — ${c}</li>`);
     }
-    if (na.doctorTarget)  items.push(`<li>👨‍⚕️ Koruma: <strong>${na.doctorTarget}</strong></li>`);
+    if (na.doctorTarget)  items.push(`<li>👨‍⚕️ Koruma: <strong>${escHtml(na.doctorTarget)}</strong></li>`);
     if (na.seerTarget) {
       const r = na.seerResult ? (na.seerResult.isVampire ? ' → 🧛 Vampir' : ' → ✅ Temiz') : '';
-      items.push(`<li>🔮 Sorgulama: <strong>${na.seerTarget}</strong>${r}</li>`);
+      items.push(`<li>🔮 Sorgulama: <strong>${escHtml(na.seerTarget)}</strong>${r}</li>`);
     }
     aEl.innerHTML = items.length ? items.join('') : '<li style="color:var(--text-muted)">Henüz aksiyon yok</li>';
   }
@@ -776,7 +788,7 @@ function updateSpectatorUI(data) {
   const vEl = document.getElementById('spec-votes');
   if (vEl) {
     vEl.innerHTML = (data.votes || []).length
-      ? data.votes.map(v => `<li>${v.voter} → <strong>${v.target}</strong></li>`).join('')
+      ? data.votes.map(v => `<li>${escHtml(v.voter)} → <strong>${escHtml(v.target)}</strong></li>`).join('')
       : '<li style="color:var(--text-muted)">Henüz oy yok</li>';
   }
 
@@ -823,7 +835,7 @@ function showGameOver(winner, allRoles) {
 
   document.getElementById('all-roles-list').innerHTML = allRoles.map(p =>
     `<li class="role-item ${p.alive ? '' : 'dead'}">
-      <span class="player-name">${p.name}</span>
+      <span class="player-name">${escHtml(p.name)}</span>
       <span class="role-badge role-${p.role}">${roleLabel(p.role)}</span>
       ${p.alive ? '' : '<span class="dead-label">✝</span>'}
     </li>`
@@ -1039,7 +1051,12 @@ function showToast(msg) {
 }
 
 function escHtml(str) {
-  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return String(str ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 // ─── Ses Sistemi (Web Audio API) ──────────────────────────────────────────────

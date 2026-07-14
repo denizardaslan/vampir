@@ -2,11 +2,24 @@ const express = require('express');
 const { createServer } = require('http');
 const { Server } = require('socket.io');
 const path = require('path');
-const { randomInt } = require('crypto');
+const { randomBytes, randomInt } = require('crypto');
 
 const app = express();
 const httpServer = createServer(app);
 const io = new Server(httpServer);
+
+const TEST_DASHBOARD_ENABLED = process.env.ENABLE_TEST_DASHBOARD === 'true';
+const MAX_PLAYERS = 10;
+const MAX_NAME_LENGTH = 20;
+const MAX_LOBBY_NAME_LENGTH = 28;
+const MAX_PASSWORD_LENGTH = 24;
+const MAX_CHAT_LENGTH = 300;
+const TEST_DASHBOARD_ASSETS = new Set(['/test.html', '/test.js', '/test.css']);
+
+app.use((req, res, next) => {
+  if (TEST_DASHBOARD_ENABLED || !TEST_DASHBOARD_ASSETS.has(req.path)) return next();
+  res.status(404).send('Test dashboard is disabled.');
+});
 
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -36,8 +49,41 @@ function makeGame({ code, name, password = '' }) {
     discussDuration: 5,
     winner: null,
     discussTimer: null,
-    voteTimer: null
+    voteTimer: null,
+    phaseTimer: null,
+    cleanupTimer: null
   };
+}
+
+function randomToken() {
+  return randomBytes(24).toString('hex');
+}
+
+function sanitizeText(value, maxLength) {
+  return String(value || '')
+    .replace(/[\u0000-\u001f\u007f]/g, '')
+    .trim()
+    .slice(0, maxLength);
+}
+
+function sanitizeName(value) {
+  return sanitizeText(value, MAX_NAME_LENGTH);
+}
+
+function sanitizeLobbyName(value) {
+  return sanitizeText(value, MAX_LOBBY_NAME_LENGTH);
+}
+
+function sanitizePassword(value) {
+  return sanitizeText(value, MAX_PASSWORD_LENGTH);
+}
+
+function sanitizeChat(value) {
+  return sanitizeText(value, MAX_CHAT_LENGTH);
+}
+
+function isSafePlayerId(playerId) {
+  return /^[A-Za-z0-9_-]{8,80}$/.test(String(playerId || ''));
 }
 
 function makeLobbyCode() {
@@ -57,9 +103,13 @@ function getAlivePlayers(game) {
   return game.players.filter(p => p.alive);
 }
 
-function findGameByPlayerId(playerId) {
+function getConnectedAlivePlayers(game) {
+  return game.players.filter(p => p.alive && !p.disconnected);
+}
+
+function findGameByPlayerCredentials(playerId, reconnectToken) {
   for (const game of games.values()) {
-    const player = game.players.find(p => p.id === playerId);
+    const player = game.players.find(p => p.id === playerId && p.reconnectToken === reconnectToken);
     if (player) return { game, player };
   }
   return null;
@@ -147,8 +197,13 @@ function validateStartConfig(game) {
   const connectedCount = game.players.filter(p => !p.disconnected).length;
   if (connectedCount !== game.players.length) return 'Bağlantısı kopmuş oyuncu varken oyun başlatılamaz.';
   if (game.players.length < 3) return 'Oyunu başlatmak için en az 3 oyuncu gerekli.';
+  if (game.players.length > MAX_PLAYERS) return `En fazla ${MAX_PLAYERS} oyuncu ile oyun başlatılabilir.`;
   if (game.vampireCount < 1 || game.vampireCount > 3) return 'Vampir sayısı 1, 2 veya 3 olmalı.';
   if (game.vampireCount >= game.players.length) return 'Vampir sayısı oyuncu sayısından az olmalı.';
+  if (game.vampireCount * 2 >= game.players.length) return 'Vampirler oyun başında çoğunluğa çok yakın; oyuncu sayısını artırın veya vampir sayısını azaltın.';
+  if (!game.noKillFirstNight && game.vampireCount * 2 + 1 >= game.players.length) return 'İlk gece öldürme açıkken vampirler ilk sabah otomatik kazanabilir; ilk gece öldürmeyi kapatın veya dengeyi değiştirin.';
+  const requestedSpecials = (game.withDoctor ? 1 : 0) + (game.withSeer ? 1 : 0);
+  if (requestedSpecials > game.players.length - game.vampireCount) return 'Seçilen özel roller için yeterli köylü tarafı oyuncusu yok.';
   return null;
 }
 
@@ -178,6 +233,7 @@ function sendLobbyUpdate(game) {
       lobbyCode: game.code,
       lobbyName: game.name,
       lobbyPassword: p.isHost ? game.password : null,
+      reconnectToken: p.reconnectToken,
       players,
       isHost: p.isHost,
       gameState: { phase: game.phase, ...getRoleConfig(game) }
@@ -227,15 +283,39 @@ function checkWinCondition(game) {
 function finishGame(game, winner, delay = 0) {
   game.winner = winner;
   game.phase = 'game_over';
-  if (game.discussTimer) clearTimeout(game.discussTimer);
-  if (game.voteTimer) clearTimeout(game.voteTimer);
+  clearGameTimers(game);
   setTimeout(() => {
     io.to(game.code).emit('game_over', { winner, allRoles: getAllRoles(game) });
     sendTestDashboardUpdate(game);
   }, delay);
+  if (game.cleanupTimer) clearTimeout(game.cleanupTimer);
+  game.cleanupTimer = setTimeout(() => {
+    if (game.phase === 'game_over') {
+      games.delete(game.code);
+      sendLobbyList();
+    }
+  }, 2 * 60 * 60 * 1000);
+  if (game.cleanupTimer.unref) game.cleanupTimer.unref();
 }
 
-function startNight(game) {
+function clearGameTimers(game) {
+  if (game.discussTimer) { clearTimeout(game.discussTimer); game.discussTimer = null; }
+  if (game.voteTimer) { clearTimeout(game.voteTimer); game.voteTimer = null; }
+  if (game.phaseTimer) { clearTimeout(game.phaseTimer); game.phaseTimer = null; }
+}
+
+function schedulePhaseTransition(game, expectedPhase, delay, next) {
+  if (game.phaseTimer) clearTimeout(game.phaseTimer);
+  game.phaseTimer = setTimeout(() => {
+    game.phaseTimer = null;
+    if (game.phase !== expectedPhase || game.phase === 'game_over') return;
+    next();
+  }, delay);
+}
+
+function startNight(game, expectedPhase = null) {
+  if (expectedPhase && game.phase !== expectedPhase) return;
+  if (game.phase === 'game_over') return;
   game.dayNumber++;
   game.phase = 'night';
   const prevLastSelfProtect = game.nightActions.doctor.lastSelfProtect;
@@ -262,7 +342,7 @@ function startNight(game) {
 function checkNightComplete(game) {
   if (game.phase !== 'night') return;
 
-  const alive = getAlivePlayers(game);
+  const alive = getConnectedAlivePlayers(game);
   const vampires = alive.filter(p => p.role === 'vampire');
   const doctor = game.withDoctor ? alive.find(p => p.role === 'doctor') : null;
   const seer = game.withSeer ? alive.find(p => p.role === 'seer') : null;
@@ -316,7 +396,7 @@ function resolveNight(game) {
     return;
   }
 
-  setTimeout(() => startDiscuss(game), 5000);
+  schedulePhaseTransition(game, 'day_reveal', 5000, () => startDiscuss(game));
 }
 
 function startDiscuss(game) {
@@ -342,7 +422,7 @@ function startVoting(game) {
   game.phase = 'day_vote';
   game.votes = {};
 
-  const alive = getAlivePlayers(game);
+  const alive = getConnectedAlivePlayers(game);
   io.to(game.code).emit('phase_change', {
     phase: 'day_vote',
     data: { voters: alive.map(p => ({ id: p.id, name: p.name })) }
@@ -358,7 +438,7 @@ function resolveVoting(game) {
   if (game.voteTimer) { clearTimeout(game.voteTimer); game.voteTimer = null; }
   if (game.phase !== 'day_vote') return;
 
-  const alive = getAlivePlayers(game);
+  const alive = getConnectedAlivePlayers(game);
   const voteCounts = {};
 
   for (const voter of alive) {
@@ -401,7 +481,7 @@ function resolveVoting(game) {
     return;
   }
 
-  setTimeout(() => startNight(game), 4000);
+  schedulePhaseTransition(game, 'day_vote', 4000, () => startNight(game, 'day_vote'));
 }
 
 function getPhaseData(game) {
@@ -574,6 +654,7 @@ function emitReconnect(socket, game, player) {
       alive: player.alive,
       isHost: player.isHost
     },
+    reconnectToken: player.reconnectToken,
     fellowVampires: player.role === 'vampire'
       ? game.players.filter(p => p.role === 'vampire' && p.id !== player.id).map(p => p.name)
       : [],
@@ -597,34 +678,38 @@ function emitReconnect(socket, game, player) {
 }
 
 function createLobby(socket, { name, playerId, lobbyName, password }) {
-  const trimmed = String(name || '').trim();
-  const roomName = String(lobbyName || '').trim();
+  if (findGameBySocket(socket)) { socket.emit('error', { message: 'Bu sekme zaten bir oyunda.' }); return; }
+  if (!isSafePlayerId(playerId)) { socket.emit('error', { message: 'Oyuncu oturumu geçersiz. Sayfayı yenileyin.' }); return; }
+  const trimmed = sanitizeName(name);
+  const roomName = sanitizeLobbyName(lobbyName);
   if (!trimmed) { socket.emit('error', { message: 'İsim boş olamaz.' }); return; }
   if (!roomName) { socket.emit('error', { message: 'Lobi adı boş olamaz.' }); return; }
 
   const code = makeLobbyCode();
-  const game = makeGame({ code, name: roomName, password: String(password || '').trim() });
+  const game = makeGame({ code, name: roomName, password: sanitizePassword(password) });
   games.set(code, game);
-  const player = { id: playerId, name: trimmed, role: null, alive: true, socketId: socket.id, isHost: true };
+  const player = { id: playerId, reconnectToken: randomToken(), name: trimmed, role: null, alive: true, socketId: socket.id, isHost: true, disconnected: false };
   game.players.push(player);
   attachPlayerToGame(socket, game, player);
   sendLobbyUpdate(game);
 }
 
-function joinLobby(socket, { name, playerId, lobbyCode, lobbyId, lobbyPassword }) {
+function joinLobby(socket, { name, playerId, reconnectToken, lobbyCode, lobbyId, lobbyPassword }) {
+  if (findGameBySocket(socket)) { socket.emit('error', { message: 'Bu sekme zaten bir oyunda.' }); return; }
+  if (!isSafePlayerId(playerId)) { socket.emit('error', { message: 'Oyuncu oturumu geçersiz. Sayfayı yenileyin.' }); return; }
   const code = normalizeCode(lobbyId || lobbyCode);
   const game = games.get(code);
   if (!game) { socket.emit('error', { message: 'Lobi bulunamadı.' }); return; }
   if (game.phase !== 'lobby') { socket.emit('error', { message: 'Bu lobide oyun başlamış.' }); return; }
-  if (game.password && game.password !== String(lobbyPassword || '').trim()) {
+  if (game.password && game.password !== sanitizePassword(lobbyPassword)) {
     socket.emit('error', { message: 'Lobi şifresi yanlış.' });
     return;
   }
 
-  const trimmed = String(name || '').trim();
+  const trimmed = sanitizeName(name);
   if (!trimmed) { socket.emit('error', { message: 'İsim boş olamaz.' }); return; }
 
-  const ghost = game.players.find(p => p.id === playerId && p.disconnected);
+  const ghost = game.players.find(p => p.id === playerId && p.disconnected && p.reconnectToken === reconnectToken);
   if (ghost) {
     ghost.name = trimmed;
     attachPlayerToGame(socket, game, ghost);
@@ -636,16 +721,20 @@ function joinLobby(socket, { name, playerId, lobbyCode, lobbyId, lobbyPassword }
     socket.emit('error', { message: 'Bu isim bu lobide kullanılıyor.' });
     return;
   }
+  if (game.players.length >= MAX_PLAYERS) {
+    socket.emit('error', { message: `Bu lobi dolu. En fazla ${MAX_PLAYERS} oyuncu katılabilir.` });
+    return;
+  }
 
-  const player = { id: playerId, name: trimmed, role: null, alive: true, socketId: socket.id, isHost: false };
+  const player = { id: playerId, reconnectToken: randomToken(), name: trimmed, role: null, alive: true, socketId: socket.id, isHost: false, disconnected: false };
   game.players.push(player);
   attachPlayerToGame(socket, game, player);
   sendLobbyUpdate(game);
 }
 
 io.on('connection', (socket) => {
-  socket.on('hello', ({ playerId }) => {
-    const found = findGameByPlayerId(playerId);
+  socket.on('hello', ({ playerId, reconnectToken }) => {
+    const found = findGameByPlayerCredentials(playerId, reconnectToken);
     if (!found) {
       socket.emit('new_session', {});
       return;
@@ -660,7 +749,8 @@ io.on('connection', (socket) => {
 
     attachPlayerToGame(socket, game, player);
     emitReconnect(socket, game, player);
-    sendLobbyUpdate(game);
+    if (game.phase === 'lobby') sendLobbyUpdate(game);
+    else sendTestDashboardUpdate(game);
   });
 
   socket.on('list_lobbies', () => {
@@ -734,7 +824,7 @@ io.on('connection', (socket) => {
     io.to(game.code).emit('phase_change', { phase: 'role_reveal', data: {} });
     sendTestDashboardUpdate(game);
     sendLobbyList();
-    setTimeout(() => startNight(game), 5000);
+    schedulePhaseTransition(game, 'role_reveal', 5000, () => startNight(game, 'role_reveal'));
   });
 
   socket.on('vampire_select', ({ targetId }) => {
@@ -745,7 +835,7 @@ io.on('connection', (socket) => {
     const target = game.players.find(p => p.id === targetId && p.alive && p.role !== 'vampire');
     if (!target) return;
 
-    const aliveVampires = getAlivePlayers(game).filter(p => p.role === 'vampire');
+    const aliveVampires = getConnectedAlivePlayers(game).filter(p => p.role === 'vampire');
     game.nightActions.vampire.selectedTarget = targetId;
     game.nightActions.vampire.confirmedBy = [player.id];
 
@@ -771,7 +861,7 @@ io.on('connection', (socket) => {
       game.nightActions.vampire.confirmedBy.push(player.id);
     }
 
-    const aliveVampires = getAlivePlayers(game).filter(p => p.role === 'vampire');
+    const aliveVampires = getConnectedAlivePlayers(game).filter(p => p.role === 'vampire');
     notifyVampires(game, 'vampire_selection_update', {
       targetId: game.nightActions.vampire.selectedTarget,
       confirmedBy: game.nightActions.vampire.confirmedBy,
@@ -788,7 +878,7 @@ io.on('connection', (socket) => {
     if (!found) return;
     const { game, player } = found;
     if (game.phase !== 'night' || player.role !== 'vampire' || !player.alive) return;
-    const trimmed = String(text || '').trim();
+    const trimmed = sanitizeChat(text);
     if (!trimmed) return;
 
     game.vampireChat.push({ name: player.name, message: trimmed, timestamp: Date.now() });
@@ -801,6 +891,7 @@ io.on('connection', (socket) => {
     if (!found) return;
     const { game, player } = found;
     if (game.phase !== 'night' || player.role !== 'doctor' || !player.alive) return;
+    if (game.nightActions.doctor.target !== null) return;
 
     if (targetId === player.id && game.nightActions.doctor.lastSelfProtect === game.dayNumber - 1) {
       socket.emit('error', { message: 'Art arda iki gece kendinizi koruyamazsınız.' });
@@ -820,6 +911,7 @@ io.on('connection', (socket) => {
     if (!found) return;
     const { game, player } = found;
     if (game.phase !== 'night' || player.role !== 'seer' || !player.alive) return;
+    if (game.nightActions.seer.target !== null) return;
 
     const target = game.players.find(p => p.id === targetId && p.alive && p.id !== player.id);
     if (!target) return;
@@ -838,9 +930,11 @@ io.on('connection', (socket) => {
     if (!found) return;
     const { game, player } = found;
     if (game.phase !== 'day_vote' || !player.alive) return;
+    if (game.votes[player.id]) return;
+    if (targetId !== 'abstain' && !game.players.find(p => p.id === targetId && p.alive)) return;
 
     game.votes[player.id] = targetId;
-    const alive = getAlivePlayers(game);
+    const alive = getConnectedAlivePlayers(game);
     const votedCount = Object.keys(game.votes).length;
     const voteList = Object.entries(game.votes).map(([vid, tid]) => ({
       voterName: playerName(game, vid),
@@ -875,13 +969,13 @@ io.on('connection', (socket) => {
     const { game, player } = found;
     if (!player.isHost || game.phase !== 'game_over') return;
 
-    if (game.discussTimer) clearTimeout(game.discussTimer);
-    if (game.voteTimer) clearTimeout(game.voteTimer);
+    clearGameTimers(game);
+    if (game.cleanupTimer) { clearTimeout(game.cleanupTimer); game.cleanupTimer = null; }
     game.phase = 'lobby';
     game.players.forEach(p => {
       p.role = null;
       p.alive = true;
-      p.disconnected = false;
+      p.disconnected = !p.socketId;
     });
     game.nightActions = {
       vampire: { selectedTarget: null, confirmedBy: [] },
@@ -897,6 +991,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('test_observe', ({ lobbyCode } = {}) => {
+    if (!TEST_DASHBOARD_ENABLED) return;
     const code = normalizeCode(lobbyCode) || Array.from(games.keys())[0] || null;
     if (!code) {
       socket.emit('test_dashboard_update', buildTestDashboardData(null));
@@ -909,6 +1004,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('test_seed_lobby', ({ playerCount = 6, withDoctor = true, withSeer = true, vampireCount = 2, noKillFirstNight = false } = {}) => {
+    if (!TEST_DASHBOARD_ENABLED) return;
     const code = makeLobbyCode();
     const game = makeGame({ code, name: 'Demo Lobi', password: 'demo' });
     game.withDoctor = !!withDoctor;
@@ -924,7 +1020,8 @@ io.on('connection', (socket) => {
       alive: true,
       socketId: null,
       isHost: index === 0,
-      disconnected: false
+      disconnected: false,
+      reconnectToken: randomToken()
     }));
     games.set(code, game);
     socket.join(`test-dashboard:${code}`);
@@ -933,6 +1030,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('test_start_game', ({ lobbyCode, withDoctor = true, withSeer = true, vampireCount = 2, noKillFirstNight = false } = {}) => {
+    if (!TEST_DASHBOARD_ENABLED) return;
     const game = games.get(normalizeCode(lobbyCode)) || Array.from(games.values()).at(-1);
     if (!game || game.phase !== 'lobby') return;
     game.withDoctor = !!withDoctor;
@@ -946,10 +1044,11 @@ io.on('connection', (socket) => {
     game.phase = 'role_reveal';
     sendTestDashboardUpdate(game);
     sendLobbyList();
-    setTimeout(() => startNight(game), 5000);
+    schedulePhaseTransition(game, 'role_reveal', 5000, () => startNight(game, 'role_reveal'));
   });
 
   socket.on('test_auto_night', ({ lobbyCode } = {}) => {
+    if (!TEST_DASHBOARD_ENABLED) return;
     const game = games.get(normalizeCode(lobbyCode)) || Array.from(games.values()).at(-1);
     if (!game || game.phase !== 'night') return;
     const alive = getAlivePlayers(game);
@@ -982,6 +1081,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('test_auto_vote', ({ lobbyCode } = {}) => {
+    if (!TEST_DASHBOARD_ENABLED) return;
     const game = games.get(normalizeCode(lobbyCode)) || Array.from(games.values()).at(-1);
     if (!game) return;
     if (game.phase === 'day_discuss') startVoting(game);
@@ -1005,8 +1105,26 @@ io.on('connection', (socket) => {
     if (!found) return;
     const { game, player } = found;
 
+    player.disconnected = true;
+    player.socketId = null;
+
+    if (player.isHost) {
+      const nextHost = game.players.find(p => p.id !== player.id && !p.disconnected);
+      if (nextHost) {
+        player.isHost = false;
+        nextHost.isHost = true;
+        emitToPlayer(nextHost, 'became_host');
+      }
+    }
+
+    if (game.phase === 'night') checkNightComplete(game);
+    if (game.phase === 'day_vote') {
+      const activeVoters = getConnectedAlivePlayers(game);
+      const votedCount = activeVoters.filter(p => game.votes[p.id]).length;
+      if (activeVoters.length === 0 || votedCount >= activeVoters.length) resolveVoting(game);
+    }
+
     if (game.phase === 'lobby') {
-      player.disconnected = true;
       sendLobbyUpdate(game);
       player.removeTimer = setTimeout(() => {
         game.players = game.players.filter(p => p.id !== player.id);
@@ -1018,14 +1136,38 @@ io.on('connection', (socket) => {
           sendLobbyUpdate(game);
         }
       }, 30000);
+    } else {
+      sendSpectatorUpdate(game);
+      sendTestDashboardUpdate(game);
     }
   });
 });
 
 const PORT = Number(process.env.PORT || 3000);
-httpServer.listen(PORT, '0.0.0.0', () => {
-  console.log(`\nVampir Köylü sunucu çalışıyor!`);
-  console.log(`  Yerel:   http://localhost:${PORT}`);
-  console.log(`\nTelefonlar için IP adresini öğrenmek üzere şunu çalıştır:`);
-  console.log(`  ipconfig getifaddr en0\n`);
-});
+if (require.main === module) {
+  httpServer.listen(PORT, '0.0.0.0', () => {
+    console.log(`\nVampir Köylü sunucu çalışıyor!`);
+    console.log(`  Yerel:   http://localhost:${PORT}`);
+    console.log(`\nTelefonlar için IP adresini öğrenmek üzere şunu çalıştır:`);
+    console.log(`  ipconfig getifaddr en0\n`);
+  });
+}
+
+module.exports = {
+  TEST_DASHBOARD_ENABLED,
+  MAX_PLAYERS,
+  app,
+  httpServer,
+  games,
+  makeGame,
+  buildRoles,
+  validateStartConfig,
+  sanitizeName,
+  sanitizeLobbyName,
+  sanitizePassword,
+  sanitizeChat,
+  isSafePlayerId,
+  startNight,
+  finishGame,
+  clearGameTimers
+};
