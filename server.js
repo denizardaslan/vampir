@@ -14,6 +14,8 @@ const MAX_NAME_LENGTH = 20;
 const MAX_LOBBY_NAME_LENGTH = 28;
 const MAX_PASSWORD_LENGTH = 24;
 const MAX_CHAT_LENGTH = 300;
+const MAX_CHAT_MESSAGES = 200;
+const ABANDONED_GAME_TTL = 30 * 60 * 1000;
 const TEST_DASHBOARD_ASSETS = new Set(['/test.html', '/test.js', '/test.css']);
 
 app.use((req, res, next) => {
@@ -46,13 +48,39 @@ function makeGame({ code, name, password = '' }) {
     vampireChat: [],
     dayNumber: 0,
     lastNightDeath: null,
+    lastNightNoDeathReason: null,
     discussDuration: 5,
     winner: null,
     discussTimer: null,
     voteTimer: null,
     phaseTimer: null,
-    cleanupTimer: null
+    cleanupTimer: null,
+    abandonTimer: null
   };
+}
+
+function deleteGame(game) {
+  clearGameTimers(game);
+  if (game.cleanupTimer) { clearTimeout(game.cleanupTimer); game.cleanupTimer = null; }
+  if (game.abandonTimer) { clearTimeout(game.abandonTimer); game.abandonTimer = null; }
+  game.players.forEach(p => {
+    if (p.removeTimer) { clearTimeout(p.removeTimer); p.removeTimer = null; }
+  });
+  games.delete(game.code);
+  testDashboardRooms.delete(game.code);
+  sendLobbyList();
+}
+
+// Oyun ortasında herkesin bağlantısı koparsa oyun bellekte sonsuza kadar kalmasın.
+function scheduleAbandonedCleanup(game) {
+  if (game.abandonTimer) return;
+  game.abandonTimer = setTimeout(() => {
+    game.abandonTimer = null;
+    if (games.get(game.code) !== game) return;
+    if (game.players.some(p => !p.disconnected)) return;
+    deleteGame(game);
+  }, ABANDONED_GAME_TTL);
+  if (game.abandonTimer.unref) game.abandonTimer.unref();
 }
 
 function randomToken() {
@@ -284,16 +312,17 @@ function finishGame(game, winner, delay = 0) {
   game.winner = winner;
   game.phase = 'game_over';
   clearGameTimers(game);
-  setTimeout(() => {
+  const announce = setTimeout(() => {
+    // Host bu arada yeni oyun başlatmış olabilir; o lobiyi bozma.
+    if (game.phase !== 'game_over' || games.get(game.code) !== game) return;
     io.to(game.code).emit('game_over', { winner, allRoles: getAllRoles(game) });
     sendTestDashboardUpdate(game);
   }, delay);
+  if (announce.unref) announce.unref();
   if (game.cleanupTimer) clearTimeout(game.cleanupTimer);
   game.cleanupTimer = setTimeout(() => {
-    if (game.phase === 'game_over') {
-      games.delete(game.code);
-      sendLobbyList();
-    }
+    game.cleanupTimer = null;
+    if (game.phase === 'game_over') deleteGame(game);
   }, 2 * 60 * 60 * 1000);
   if (game.cleanupTimer.unref) game.cleanupTimer.unref();
 }
@@ -379,13 +408,21 @@ function resolveNight(game) {
     }
   }
 
+  let noDeathReason = null;
+  if (!death) {
+    if (firstNightNoKill) noDeathReason = 'first_night';
+    else if (vampireTargetId && vampireTargetId === doctorTargetId) noDeathReason = 'doctor';
+    else noDeathReason = 'no_target';
+  }
+
   game.lastNightDeath = death;
+  game.lastNightNoDeathReason = noDeathReason;
   game.nightActions.doctor.lastSelfProtect = newLastSelfProtect;
   game.phase = 'day_reveal';
 
   const revealData = death
     ? { deathName: death.name, deathRole: death.role }
-    : { deathName: null, deathRole: null };
+    : { deathName: null, deathRole: null, noDeathReason };
 
   io.to(game.code).emit('phase_change', { phase: 'day_reveal', data: revealData });
   sendSpectatorUpdate(game);
@@ -492,7 +529,7 @@ function getPhaseData(game) {
     case 'day_reveal':
       return game.lastNightDeath
         ? { deathName: game.lastNightDeath.name, deathRole: game.lastNightDeath.role }
-        : { deathName: null, deathRole: null };
+        : { deathName: null, deathRole: null, noDeathReason: game.lastNightNoDeathReason };
     case 'day_discuss': {
       const elapsed = game.discussStartTime ? Math.floor((Date.now() - game.discussStartTime) / 1000) : 0;
       const remaining = Math.max(0, game.discussDuration * 60 - elapsed);
@@ -637,6 +674,10 @@ function attachPlayerToGame(socket, game, player) {
   if (player.removeTimer) {
     clearTimeout(player.removeTimer);
     player.removeTimer = null;
+  }
+  if (game.abandonTimer) {
+    clearTimeout(game.abandonTimer);
+    game.abandonTimer = null;
   }
   player.disconnected = false;
   player.socketId = socket.id;
@@ -883,6 +924,9 @@ io.on('connection', (socket) => {
     if (!trimmed) return;
 
     game.vampireChat.push({ name: player.name, message: trimmed, timestamp: Date.now() });
+    if (game.vampireChat.length > MAX_CHAT_MESSAGES) {
+      game.vampireChat.splice(0, game.vampireChat.length - MAX_CHAT_MESSAGES);
+    }
     notifyVampires(game, 'vampire_chat_update', { messages: game.vampireChat });
     sendTestDashboardUpdate(game);
   });
@@ -987,6 +1031,7 @@ io.on('connection', (socket) => {
     game.vampireChat = [];
     game.dayNumber = 0;
     game.lastNightDeath = null;
+    game.lastNightNoDeathReason = null;
     game.winner = null;
     sendLobbyUpdate(game);
   });
@@ -1128,11 +1173,12 @@ io.on('connection', (socket) => {
     if (game.phase === 'lobby') {
       sendLobbyUpdate(game);
       player.removeTimer = setTimeout(() => {
+        player.removeTimer = null;
+        if (games.get(game.code) !== game) return;
         game.players = game.players.filter(p => p.id !== player.id);
         if (player.isHost && game.players.length) game.players[0].isHost = true;
         if (!game.players.length) {
-          games.delete(game.code);
-          sendLobbyList();
+          deleteGame(game);
         } else {
           sendLobbyUpdate(game);
         }
@@ -1140,6 +1186,7 @@ io.on('connection', (socket) => {
     } else {
       sendSpectatorUpdate(game);
       sendTestDashboardUpdate(game);
+      if (!game.players.some(p => !p.disconnected)) scheduleAbandonedCleanup(game);
     }
   });
 });
@@ -1171,5 +1218,10 @@ module.exports = {
   isSafePlayerId,
   startNight,
   finishGame,
-  clearGameTimers
+  clearGameTimers,
+  deleteGame,
+  scheduleAbandonedCleanup,
+  resolveNight,
+  MAX_CHAT_MESSAGES,
+  ABANDONED_GAME_TTL
 };
