@@ -589,11 +589,17 @@ function showRevealContent(data) {
         <p>bu gece öldürüldü.</p>
       </div>`;
   } else {
+    const reasons = {
+      doctor: 'Doktor bu gece birini kurtardı.',
+      first_night: 'İlk gece kimse öldürülmedi.',
+      no_target: 'Vampirler bu gece kimseyi seçmedi.'
+    };
+    const reason = reasons[data.noDeathReason] || 'Köy sabaha sağ salim çıktı.';
     el.innerHTML =
       `<div class="reveal-safe">
         <div class="safe-icon-big">🌅</div>
         <h2>Kimse ölmedi!</h2>
-        <p>Doktor bu gece birini kurtardı.</p>
+        <p>${reason}</p>
       </div>`;
   }
 }

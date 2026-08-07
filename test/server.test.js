@@ -3,7 +3,9 @@ const { after, describe, it } = require('node:test');
 
 const {
   MAX_PLAYERS,
+  ABANDONED_GAME_TTL,
   httpServer,
+  games,
   makeGame,
   buildRoles,
   shuffle,
@@ -14,7 +16,10 @@ const {
   sanitizeChat,
   isSafePlayerId,
   startNight,
-  clearGameTimers
+  resolveNight,
+  clearGameTimers,
+  deleteGame,
+  scheduleAbandonedCleanup
 } = require('../server');
 
 after(() => {
@@ -130,6 +135,98 @@ describe('phase guards', () => {
     assert.equal(game.dayNumber, 1);
     assert.equal(game.phase, 'night');
     clearGameTimers(game);
+  });
+});
+
+describe('day reveal messaging', () => {
+  function nightGame(overrides = {}) {
+    const game = configuredGame({ players: 5, vampireCount: 1, ...overrides });
+    game.phase = 'night';
+    game.dayNumber = 1;
+    game.players[0].role = 'vampire';
+    game.players[1].role = 'doctor';
+    game.players[2].role = 'seer';
+    game.players[3].role = 'villager';
+    game.players[4].role = 'villager';
+    return game;
+  }
+
+  it('reports the doctor save only when the doctor actually blocked the kill', () => {
+    const game = nightGame();
+    game.nightActions.vampire.selectedTarget = game.players[3].id;
+    game.nightActions.doctor.target = game.players[3].id;
+
+    resolveNight(game);
+
+    assert.equal(game.lastNightDeath, null);
+    assert.equal(game.lastNightNoDeathReason, 'doctor');
+    clearGameTimers(game);
+  });
+
+  it('reports the first-night rule instead of a phantom doctor save', () => {
+    const game = nightGame();
+    game.noKillFirstNight = true;
+
+    resolveNight(game);
+
+    assert.equal(game.lastNightDeath, null);
+    assert.equal(game.lastNightNoDeathReason, 'first_night');
+    clearGameTimers(game);
+  });
+
+  it('reports an unused vampire action when nobody was targeted', () => {
+    const game = nightGame();
+
+    resolveNight(game);
+
+    assert.equal(game.lastNightDeath, null);
+    assert.equal(game.lastNightNoDeathReason, 'no_target');
+    clearGameTimers(game);
+  });
+
+  it('clears the no-death reason once someone dies', () => {
+    const game = nightGame();
+    game.nightActions.vampire.selectedTarget = game.players[3].id;
+
+    resolveNight(game);
+
+    assert.equal(game.lastNightDeath.name, game.players[3].name);
+    assert.equal(game.lastNightNoDeathReason, null);
+    clearGameTimers(game);
+  });
+});
+
+describe('abandoned game cleanup', () => {
+  it('drops an in-progress game once every player has been gone for the grace period', (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const game = configuredGame({ players: 4, vampireCount: 1 });
+    game.code = 'ABND1';
+    game.phase = 'night';
+    game.players.forEach(p => { p.disconnected = true; p.socketId = null; });
+    games.set(game.code, game);
+
+    scheduleAbandonedCleanup(game);
+    assert.equal(games.has('ABND1'), true);
+
+    t.mock.timers.tick(ABANDONED_GAME_TTL + 1);
+    assert.equal(games.has('ABND1'), false);
+  });
+
+  it('keeps the game when a player came back before the grace period ended', (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const game = configuredGame({ players: 4, vampireCount: 1 });
+    game.code = 'ABND2';
+    game.phase = 'night';
+    game.players.forEach(p => { p.disconnected = true; p.socketId = null; });
+    games.set(game.code, game);
+
+    scheduleAbandonedCleanup(game);
+    game.players[0].disconnected = false;
+    t.mock.timers.tick(ABANDONED_GAME_TTL + 1);
+
+    assert.equal(games.has('ABND2'), true);
+    deleteGame(game);
+    assert.equal(games.has('ABND2'), false);
   });
 });
 
